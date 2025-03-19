@@ -4,6 +4,7 @@ import sys
 from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
 
@@ -12,6 +13,13 @@ import torch
 from tqdm import tqdm
 from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
+
+try:
+  from torch.nn.attention.flex_attention import create_block_mask
+  FLEX_ATTN_AVAILABLE = True
+except:
+  FLEX_ATTN_AVAILABLE = False
+
 
 # Add the local directory (enables hydra.utils.instantiate for local imports)
 sys.path.append(str(Path(__file__).resolve().parent))
@@ -692,6 +700,120 @@ class MDLM(D3PM):
         return q_xs
 
 
+# TODO
+class BD3LM(MDLM):
+    def __init__(self, config: MDLMConfig):
+        super().__init__(config)
+        self.block_size = getattr(self.backbone, "block_size", self.length)
+        self.attn_backend = getattr(self.backbone, "attn_backend", "flex")
+        if not FLEX_ATTN_AVAILABLE:
+            self.attn_backend = "sdpa"
+        self._gen_mask()
+
+    def _mask_fn(b, h, q_idx, kv_idx, block_size=None, n=None):
+        """
+        Constructs the specialized block diffusion attention mask for training
+        composed of three masks:
+        - **Block Diagonal Mask (M_BD)**: Self-attention within noised blocks
+        - **Offset Block Causal Mask (M_OBC)**: Cross-attention for conditional context
+        - **Block Causal Mask (M_BC)**: Attention to update x0
+
+        Args:
+            b, h: Batch and head indices (ignored for mask logic).
+            q_idx, kv_idx: Query and Key indices.
+            seq_len: Total sequence length.
+            block_size: Defines the block structure.
+
+        Returns:
+            A boolean attention mask.
+        """
+
+        # Indicate whether token belongs to xt or x0
+        x0_flag_q = (q_idx >= n)
+        x0_flag_kv = (kv_idx >= n)
+
+        # Compute block indices
+        block_q = torch.where(x0_flag_q == 1,
+                                (q_idx - n) // block_size,
+                                q_idx // block_size)
+        block_kv = torch.where(x0_flag_kv == 1,
+                                (kv_idx - n) // block_size,
+                                kv_idx // block_size)
+
+        # **1. Block Diagonal Mask (M_BD) **
+        block_diagonal = (block_q == block_kv) & (x0_flag_q == x0_flag_kv)
+
+        # **2. Offset Block-Causal Mask (M_OBC) **
+        offset_block_causal = (
+            (block_q > block_kv)
+            & (x0_flag_kv == 1)
+            & (x0_flag_q == 0)
+        )
+
+        # **3. Block-Causal Mask (M_BC) **
+        block_causal = (block_q >= block_kv) & (x0_flag_kv == 1) & (x0_flag_q == 1)
+
+        # **4. Combine Masks **
+        return block_diagonal | offset_block_causal | block_causal
+    
+    def _gen_mask(self):
+        if self.attn_backend == "flex":
+            self.mask = create_block_mask(
+                partial(self._mask_fn, block_size=self.block_size, n=self.length),
+                B=None, H=None, Q_LEN=self.length*2, KV_LEN=self.length*2)
+        elif self.attn_backend == "sdpa":
+            self.mask = self._mask_fn(
+                b=None, h=None, q_idx=torch.arange(self.length)[:, None], 
+                kv_idx=torch.arange(self.length)[None, :],
+                block_size=self.block_size, n=self.length)
+
+    def _prepare_inputs(
+        self,
+        input_ids: torch.LongTensor,
+        attention_mask: torch.FloatTensor | None = None,
+        t: torch.FloatTensor | None = None,
+    ) -> DenoiserInput:
+        # Prepare inputs for BD3-LM
+        labels = copy.deepcopy(input_ids[..., 1:])[..., None]
+        input_ids = input_ids[..., :-1]
+        if attention_mask is None:
+            attention_mask = self.mask
+       
+        return DenoiserInput(
+            xt=input_ids,
+            x0=labels,
+            attention_mask=attention_mask,
+        )
+
+
+    def _backbone_forward(self, denoiser_inputs: DenoiserInput, **kwargs: Any):
+        """Forward pass for the backbone model (should return logits).
+
+        Some classes may need to override this method.
+
+        Parameters:
+            denoiser_inputs (DenoiserInput): Inputs passed to the denoiser model.
+
+        Returns:
+            Backbone output (torch.Tensor).
+        """
+        x_full = torch.cat((denoiser_inputs.xt, denoiser_inputs.x0), dim=1)
+
+        if self.time_conditioned_backbone:
+            out = self.backbone(
+                x_full,
+                attention_mask=denoiser_inputs.attention_mask,
+                noise=denoiser_inputs.alpha_t,
+            )
+        out = self.backbone(
+            x_full, attention_mask=denoiser_inputs.attention_mask, **kwargs
+        )
+        return out[:, :denoiser_inputs.xt.size(1)]
+
+    def _generate_unconditional(self, alpha_t, alpha_s, nucleus_p, denoiser_inputs = None, cache = None):
+        # TODO
+        pass
+    
 # TODO
 # class UDLM(D3PM):
 

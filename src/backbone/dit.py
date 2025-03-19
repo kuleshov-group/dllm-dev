@@ -6,24 +6,44 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor, nn
 
+try:
+  from torch.nn.attention.flex_attention import flex_attention
+  FLEX_ATTN_AVAILABLE = True
+except:
+  FLEX_ATTN_AVAILABLE = False
+
+
 # --------------------------------------------------------------------------------
 # Functions
 # --------------------------------------------------------------------------------
 
+@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
+def fused_flex_attention(q, k, v, attention_mask=None):
+    return flex_attention(q, k, v, block_mask=attention_mask)
 
 def multi_head_attention(
-    q: Tensor, k: Tensor, v: Tensor, is_causal: bool = False
+    q: Tensor, k: Tensor, v: Tensor, is_causal: bool = False,
+    attention_mask = None, backend: str = "sdpa"
 ) -> Tensor:
     # Assuming qkv is a tensor with shape [batch, seq_len, 3, num_heads, head_dim]
     # where the 3 represents Q, K, V packed in that order
-    attention_output = F.scaled_dot_product_attention(
-        query=q.transpose(1, 2),
-        key=k.transpose(1, 2),
-        value=v.transpose(1, 2),
-        attn_mask=None,
-        dropout_p=0.0,
-        is_causal=is_causal,
-    )
+    if backend == "sdpa":
+        attention_output = F.scaled_dot_product_attention(
+            query=q.transpose(1, 2),
+            key=k.transpose(1, 2),
+            value=v.transpose(1, 2),
+            attn_mask=attention_mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
+        )
+    elif backend == "flex":
+        if not FLEX_ATTN_AVAILABLE:
+            raise ValueError("Flex Attention is not available.")
+        attention_output = fused_flex_attention(
+            q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
+            mask=attention_mask
+        )
+
     # [batch_size, seq_len, num_heads, head_dim]
     attention_output = attention_output.transpose(1, 2)
     return einops.rearrange(attention_output, "b s h d -> b s (h d)")
@@ -216,7 +236,8 @@ class DDiTBlock(nn.Module):
             self.adaln.bias.data.zero_()
 
     def forward(
-        self, x: Tensor, rotary_cos_sin: tuple[Tensor, Tensor], c: Tensor | None = None
+        self, x: Tensor, rotary_cos_sin: tuple[Tensor, Tensor], c: Tensor | None = None,
+        attention_mask = None, attn_backend: str = "sdpa"
     ) -> Tensor:
         """Forward pass for a single DDiT block.
 
@@ -246,7 +267,8 @@ class DDiTBlock(nn.Module):
         )
         q, k, v = split_and_apply_rotary_pos_emb(qkv, rotary_cos_sin)
 
-        x = multi_head_attention(q, k, v, is_causal=self.causal)
+        x = multi_head_attention(q, k, v, is_causal=self.causal,
+                                 attention_mask=attention_mask, backend=attn_backend)
 
         x = self.attn_out(x)
         x = gate_msa * self.dropout1(x) + x_skip
