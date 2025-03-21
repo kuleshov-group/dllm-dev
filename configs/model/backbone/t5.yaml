@@ -1,0 +1,7 @@
+defaults:
+  - /model/backbone@_global_.model.config.backbone_config.encoder_net: ???
+  - /model/backbone@_global_.model.config.backbone_config.decoder_net: ???
+_target_: src.backbone.t5.T5
+mask_token_id: ${get_mask_token_id:${tokenizer}}
+encoder_hidden_dim: ???
+decoder_hidden_dim: ???

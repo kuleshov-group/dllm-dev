@@ -9,7 +9,7 @@ Internal repo for iteration on Diffusion LLMs
 Setup a conda environment and install dependencies using:
 
 ```bash
-conda env create -f requirements.yml
+conda env create -f requirements.yaml
 ```
 
 Activate the environment:

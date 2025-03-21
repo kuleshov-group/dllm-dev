@@ -7,10 +7,9 @@ import torch.nn.functional as F
 from torch import Tensor, nn
 
 try:
-  from torch.nn.attention.flex_attention import flex_attention
-  FLEX_ATTN_AVAILABLE = True
+  from torch.nn.attention.flex_attention import flex_attention, BlockMask
 except:
-  FLEX_ATTN_AVAILABLE = False
+  flex_attention, BlockMask = None, None
 
 
 # --------------------------------------------------------------------------------
@@ -37,7 +36,7 @@ def multi_head_attention(
             is_causal=is_causal,
         )
     elif backend == "flex":
-        if not FLEX_ATTN_AVAILABLE:
+        if flex_attention is None:
             raise ValueError("Flex Attention is not available.")
         attention_output = fused_flex_attention(
             q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2),
@@ -211,10 +210,12 @@ class DDiTBlock(nn.Module):
         use_adaln: bool,
         mlp_ratio: int = 4,
         dropout: float = 0.1,
+        attn_backend: str = "sdpa",  # "sdpa" or "flex"
     ):
         super().__init__()
         self.causal = causal
         self.use_adaln = use_adaln
+        self.attn_backend = attn_backend
         self.n_heads = n_heads
 
         self.norm1 = nn.LayerNorm(hidden_size)
@@ -237,7 +238,7 @@ class DDiTBlock(nn.Module):
 
     def forward(
         self, x: Tensor, rotary_cos_sin: tuple[Tensor, Tensor], c: Tensor | None = None,
-        attention_mask = None, attn_backend: str = "sdpa"
+        attention_mask = None
     ) -> Tensor:
         """Forward pass for a single DDiT block.
 
@@ -268,7 +269,7 @@ class DDiTBlock(nn.Module):
         q, k, v = split_and_apply_rotary_pos_emb(qkv, rotary_cos_sin)
 
         x = multi_head_attention(q, k, v, is_causal=self.causal,
-                                 attention_mask=attention_mask, backend=attn_backend)
+                                 attention_mask=attention_mask, backend=self.attn_backend)
 
         x = self.attn_out(x)
         x = gate_msa * self.dropout1(x) + x_skip
@@ -317,6 +318,7 @@ class DIT(nn.Module):
         n_heads: int = 12,
         scale_by_sigma: bool = True,
         dropout: float = 0.1,
+        attn_backend: str = "sdpa",  # "sdpa" or "flex"
     ):
         super().__init__()
         self.vocab_size = vocab_size
@@ -326,6 +328,7 @@ class DIT(nn.Module):
         self.timestep_embed = TimestepEmbedding(cond_dim)
         self.rotary_embed = RotaryEmbedding(hidden_size // n_heads)
         self.activation = nn.SiLU()
+        self.attn_backend = attn_backend
 
         blocks = []
         for _ in range(n_blocks):
@@ -337,6 +340,7 @@ class DIT(nn.Module):
                     n_heads=n_heads,
                     cond_dim=cond_dim,
                     dropout=dropout,
+                    attn_backend=attn_backend,
                 )
             )
         self.blocks = nn.ModuleList(blocks)
@@ -349,19 +353,35 @@ class DIT(nn.Module):
         )
         self.scale_by_sigma = scale_by_sigma
 
-    def forward(self, input_ids: Tensor, noise: Tensor, **_: Any) -> Tensor:
+    def get_input_embeddings(self) -> nn.Embedding:
+        """Get the input embeddings layer."""
+        return self.vocab_embed
+
+    def forward(self, input_ids: Tensor, noise: Tensor,
+                output_hidden_states: bool = False, skip_embedding: bool=False, **_: Any) -> Tensor:
         """Forward pass for DIT model.
 
         Args:
             input_ids: Input ids of shape (batch_size, sequence_length)
             noise: Noise float tensor of shape (batch_size,)
+            output_hidden_states: If True, return all hidden states from the blocks
+            skip_embedding: If True, assume input_ids are already embedded
         """
-        x = self.vocab_embed(input_ids)
+        if not skip_embedding:
+            x = self.vocab_embed(input_ids)
+        else:
+            x = input_ids
         c = None if self.causal else self.activation(self.timestep_embed(noise))
         rotary_cos_sin = self.rotary_embed(x)
 
+        all_hidden_states = []
         for block in self.blocks:
             x = block(x, rotary_cos_sin, c)
+            if output_hidden_states:
+                all_hidden_states.append(x)
         x = self.output_layer(x, c)
 
-        return x
+        if output_hidden_states:
+            return x, all_hidden_states
+        else:
+            return x

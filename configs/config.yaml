@@ -6,7 +6,7 @@ defaults:
   - collator: denoising
   - dataset@train_dataset: ???
   - dataset@eval_dataset: ???
-  - noise@model.config.noise_config: loglinear
+  - noise@model.config.noise_config: linear
   - model: mdlm
   - model/backbone@model.config.backbone_config: ???
   - _self_

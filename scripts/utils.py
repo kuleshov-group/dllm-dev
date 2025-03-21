@@ -50,6 +50,9 @@ def register_useful_resolvers() -> None:
         "make_tokenization_config",
         lambda tokenizer_cfg: _make_tokenization_config(tokenizer_cfg),
     )
+    OmegaConf.register_new_resolver(
+        "get_mask_token_id",
+        lambda tokenizer_cfg: _make_tokenization_config(tokenizer_cfg)["mask_token_id"])
 
 
 def format_number(num):

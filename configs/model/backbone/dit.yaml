@@ -8,3 +8,4 @@ dropout: 0.1
 causal: false
 use_adaln: true
 vocab_size: ${model.config.tokenization_config.vocab_size}
+attn_backend: sdpa

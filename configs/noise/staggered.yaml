@@ -1,0 +1,4 @@
+_target_: src.noise_schedule.noise_schedules.StaggeredNoise
+eps: 1e-3
+scale: 1
+n: ${model.config.length}
