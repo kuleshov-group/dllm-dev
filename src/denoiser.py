@@ -15,9 +15,13 @@ from transformers import PretrainedConfig, PreTrainedModel
 from transformers.modeling_outputs import ModelOutput
 
 try:
-  from torch.nn.attention.flex_attention import flex_attention, BlockMask, create_block_mask
-except:
-  flex_attention, BlockMask = None, None
+    from torch.nn.attention.flex_attention import (
+        BlockMask,
+        create_block_mask,
+        flex_attention,
+    )
+except ImportError:
+    flex_attention, BlockMask = None, None
 
 # Add the local directory (enables hydra.utils.instantiate for local imports)
 sys.path.append(str(Path(__file__).resolve().parent))
@@ -29,8 +33,8 @@ from src.backbone.dit import DIT  # noqa: F401
 from src.noise_schedule.noise_schedules import (  # noqa: F401
     CosineNoise,
     ExpNoise,
-    LogarithmicNoise,
     LinearNoise,
+    LogarithmicNoise,
     StaggeredNoise,
 )
 
@@ -43,8 +47,8 @@ class DenoiserInput(OrderedDict):
     x0: Optional[torch.Tensor] = None  # (B, L) Tensor of token_ids (not used in gen.)
     attention_mask: Optional[torch.Tensor] = None  # (B, L)
     t: Optional[torch.Tensor] = None  # (B,)
-    move_chance: Optional[torch.Tensor] = None  # (B,) | (B, 1) | (B, 1, 1)
-    loss_scaling: Optional[torch.Tensor] = None  # (B,) | (B, 1) | (B, 1, 1)
+    alpha_t: Optional[torch.Tensor] = None  # (B,) | (B, 1) | (B, 1, 1)
+    alpha_t_prime: Optional[torch.Tensor] = None  # (B,) | (B, 1) | (B, 1, 1)
     # Placeholder in case future experiments require different inputs
     kwargs: dict[str, Any] | None = None
 
@@ -214,7 +218,7 @@ class Denoiser(ABC, PreTrainedModel):
             return self.backbone(
                 denoiser_inputs.xt,
                 attention_mask=denoiser_inputs.attention_mask,
-                noise=(1-denoiser_inputs.move_chance),
+                noise=(1 - denoiser_inputs.alpha_t),
             )
         return self.backbone(
             denoiser_inputs.xt, attention_mask=denoiser_inputs.attention_mask, **kwargs
@@ -465,19 +469,19 @@ class D3PM(Denoiser):
 
         if t is None:
             t = torch.rand(input_ids.shape[0], device=input_ids.device)
-        loss_scaling, move_chance = self.noise_schedule(t)
-        if move_chance.ndim == 1:
-            move_chance = move_chance[..., None]
-            loss_scaling = loss_scaling[..., None]
-        xt = self._sample_q_xt(input_ids, move_chance)
+        alpha_t_prime, alpha_t = self.noise_schedule(t)
+        if alpha_t.ndim == 1:
+            alpha_t = alpha_t[..., None]
+            alpha_t_prime = alpha_t_prime[..., None]
+        xt = self._sample_q_xt(input_ids, alpha_t)
 
         return DenoiserInput(
             xt=xt,
             x0=input_ids,
             attention_mask=attention_mask,
             t=t,
-            move_chance=move_chance,
-            loss_scaling=loss_scaling,
+            alpha_t=alpha_t,
+            alpha_t_prime=alpha_t_prime,
         )
 
     def _compute_loss(
@@ -507,8 +511,8 @@ class D3PM(Denoiser):
         self,
         x: torch.Tensor,
         xt: torch.Tensor,
-        move_chance_t: torch.Tensor,
-        move_chance_s: torch.Tensor,
+        alpha_t: torch.Tensor,
+        alpha_s: torch.Tensor,
     ) -> torch.Tensor:
         """Computes posterior / approximate posterior q(x_s | x_t, x),
             where x represents clean sequence (as one-hots) or the output of the
@@ -517,10 +521,9 @@ class D3PM(Denoiser):
         Args:
             x (torch.Tensor): True (one-hot) / predicted clean signal (B, L, V).
             xt (torch.Tensor): Noised signal at time t (B, L).
-            move_chance_t (torch.Tensor): Noise schedule parameter at time t (B, 1, 1).
-            move_chance_s (torch.Tensor): Noise schedule parameter at time s (B, 1, 1).
+            alpha_t (torch.Tensor): Noise schedule parameter at time t (B, 1, 1).
+            alpha_s (torch.Tensor): Noise schedule parameter at time s (B, 1, 1).
         """
-        alpha_t, alpha_s = 1 - move_chance_t, 1 - move_chance_s
         if self.diffusion_type == "absorbing_state":
             q_xs = x * (alpha_s - alpha_t)
             q_xs[..., self.mask_token_id] = 1 - alpha_s[..., 0]
@@ -547,8 +550,8 @@ class D3PM(Denoiser):
 
     def _generate_unconditional(  # TODO add CBG and CFG generation
         self,
-        move_chance_t: torch.Tensor,
-        move_chance_s: torch.Tensor,
+        alpha_t: torch.Tensor,
+        alpha_s: torch.Tensor,
         nucleus_p: float,
         denoiser_inputs: DenoiserInput | None = None,
         cache: Dict[str, torch.Tensor] | None = None,
@@ -578,7 +581,7 @@ class D3PM(Denoiser):
                 )
         else:
             x_theta = cache["x_theta"]
-        q_xs = self._compute_posterior(x_theta, move_chance_t, move_chance_s)
+        q_xs = self._compute_posterior(x_theta, alpha_t, alpha_s)
         cache = {"x_theta": x_theta}
         return q_xs, cache
 
@@ -613,18 +616,18 @@ class D3PM(Denoiser):
             if cache is None:
                 NFEs += 1
             # t is 0-dim tensor, reshape to (1, 1, 1) for broadcasting
-            move_chance_t, _ = self.noise_schedule(t)[None, None, None]
-            move_chance_s, _ = self.noise_schedule(t - dt)[None, None, None]
+            alpha_t, _ = self.noise_schedule(t)[None, None, None]
+            alpha_s, _ = self.noise_schedule(t - dt)[None, None, None]
             # prepare backbone inputs
             attention_mask = (
                 torch.ones_like(xt, dtype=torch.float) if cache is None else None
             )
             denoiser_inputs = DenoiserInput(
-                xt=xt, attention_mask=attention_mask, move_chance=move_chance_t
+                xt=xt, attention_mask=attention_mask, alpha_t=alpha_t
             )
             q_xs, cache = self._generate_unconditional(
-                move_chance_t=move_chance_t,
-                move_chance_s=move_chance_s,
+                alpha_t=alpha_t,
+                alpha_s=alpha_s,
                 nucleus_p=nucleus_p,
                 denoiser_inputs=denoiser_inputs,
                 cache=cache,
@@ -688,7 +691,9 @@ class MDLM(D3PM):
             input=model_output, dim=-1, index=denoiser_inputs.x0[:, :, None]
         ).squeeze(-1)
 
-        loss = -log_p_theta * denoiser_inputs.loss_scaling
+        loss = (
+            -log_p_theta * denoiser_inputs.alpha_t_prime / (1 - denoiser_inputs.alpha_t)
+        )
 
         nlls = loss * denoiser_inputs.attention_mask
         count = denoiser_inputs.attention_mask.sum()
@@ -696,7 +701,6 @@ class MDLM(D3PM):
         batch_nll = nlls.sum()
         token_nll = batch_nll / count
         return LossAndNllOutput(loss=token_nll, nlls=nlls)
-
 
 
 class AnyOrderMDLMConfig(MDLMConfig):
@@ -716,17 +720,23 @@ class AnyOrderMDLMConfig(MDLMConfig):
         tokenization_config: dict[str, Any] | None = None,
         T: int = 1000,
         diffusion_type: str = "absorbing",  # absorbing, uniform, ...
-        attn_backend: str = "sdpa", # sdpa, flex
+        attn_backend: str = "sdpa",  # sdpa, flex
         **kwargs,
     ):
         super().__init__(
-            length, backbone_config, noise_config, tokenization_config, T, diffusion_type, **kwargs
+            length,
+            backbone_config,
+            noise_config,
+            tokenization_config,
+            T,
+            diffusion_type,
+            **kwargs,
         )
         self.attn_backend = attn_backend
 
 
 class AnyOrderMDLM(MDLM):
-    def __init__(self,config: AnyOrderMDLMConfig):
+    def __init__(self, config: AnyOrderMDLMConfig):
         super().__init__(config)
         mask = self._gen_mask()
         self.register_buffer("mask", mask)
@@ -735,22 +745,22 @@ class AnyOrderMDLM(MDLM):
             "noise" in inspect.getfullargspec(self.backbone.forward).args
         )
         self._validate_configuration()
-        
+
     def _validate_configuration(self):
-        assert self.noise_schedule.name in {'linear', 'staggered'}
-        if self.config.attn_backend == 'flex' and flex_attention is None:
-            raise ValueError("FlexAttention not available. Please install the latest version of PyTorch.")
+        assert self.noise_schedule.name in {"linear", "staggered"}
+        if self.config.attn_backend == "flex" and flex_attention is None:
+            raise ValueError("FlexAttention not available.")
 
     def _mask_fn(
-            b: int,
-            h: int,
-            q_idx: torch.Tensor,
-            kv_idx: torch.Tensor,
-            n: int | None = None,
-        ) -> Union[torch.Tensor, BlockMask]:
+        b: int,
+        h: int,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        n: int | None = None,
+    ) -> Union[torch.Tensor, BlockMask]:
         """
         Constructs the encoder and decoder attention masks.
-        
+
         Args:
             b, h: Batch and head indices (ignored for mask logic).
             q_idx, kv_idx: Query and Key indices.
@@ -759,61 +769,62 @@ class AnyOrderMDLM(MDLM):
             A boolean attention mask.
         """
 
-        encoder_flag_q = (q_idx < n)
-        encoder_flag_kv = (kv_idx < n)
+        encoder_flag_q = q_idx < n
+        encoder_flag_kv = kv_idx < n
 
         # Compute block indices
         idx_q = torch.where(encoder_flag_q == 1, (q_idx - n), q_idx)
         idx_kv = torch.where(encoder_flag_kv == 1, (kv_idx - n), kv_idx)
 
         # **1. Encoder Self-Attention **
-        x0_self = (
-            (idx_q >= idx_kv)
-            & (encoder_flag_kv == 1) & (encoder_flag_kv == 1)
-        )
+        x0_self = (idx_q >= idx_kv) & (encoder_flag_kv == 1) & (encoder_flag_kv == 1)
 
         # **2. Decoder Self-Attention **
-        xt_self = (
-            (idx_q == idx_kv)
-            & (encoder_flag_kv == 0) & (encoder_flag_kv == 0)
-        )
+        xt_self = (idx_q == idx_kv) & (encoder_flag_kv == 0) & (encoder_flag_kv == 0)
 
         # **3. Decoder Cross-Attention **
-        xt_cross = (
-            (idx_q > idx_kv)
-            & (encoder_flag_kv == 1) & (encoder_flag_kv == 0)
-        )
+        xt_cross = (idx_q > idx_kv) & (encoder_flag_kv == 1) & (encoder_flag_kv == 0)
 
         # **4. Combine Masks **
         return xt_self | xt_cross | x0_self
-    
 
     def _gen_mask(self):
         if self.config.attn_backend == "flex":
             mask = create_block_mask(
                 partial(self._mask_fn, n=self.config.length),
-                B=None, H=None, Q_LEN=self.config.length*2, KV_LEN=self.config.length*2)
+                B=None,
+                H=None,
+                Q_LEN=self.config.length * 2,
+                KV_LEN=self.config.length * 2,
+            )
         else:
             mask = self._mask_fn(
-                b=None, h=None, q_idx=torch.arange(self.config.length)[:, None], 
-                kv_idx=torch.arange(self.config.length)[None, :], n=self.config.length)
+                b=None,
+                h=None,
+                q_idx=torch.arange(self.config.length)[:, None],
+                kv_idx=torch.arange(self.config.length)[None, :],
+                n=self.config.length,
+            )
         return mask
-    
+
     def _sample_permutation(self, batch_dim: int) -> torch.Tensor:
         noise = torch.rand((batch_dim, self.config.length))
         ts = self.noise_schedule.inverse(noise)
         perms = (-ts).argsort(-1)  # sort by unmasking timestep (high to low)
         return perms
-    
-    def _permute_attention_mask(self, batch_dim: int, 
-                                attention_mask: torch.Tensor) -> torch.Tensor:
+
+    def _permute_attention_mask(
+        self, batch_dim: int, attention_mask: torch.Tensor
+    ) -> torch.Tensor:
         """Permute encoder AND decoder attention masks for any-order training."""
         permutation = self._sample_permutation(batch_dim).to(attention_mask.device)
-        permutation = torch.cat((permutation, permutation + self.config.length + 1), dim=-1)
+        permutation = torch.cat(
+            (permutation, permutation + self.config.length + 1), dim=-1
+        )
         permuted_attention_mask = attention_mask.gather(0, permutation)
         permuted_attention_mask = permuted_attention_mask.gather(1, permutation)
         return attention_mask
-    
+
     def _prepare_inputs(
         self,
         input_ids: torch.LongTensor,
@@ -825,37 +836,41 @@ class AnyOrderMDLM(MDLM):
 
         if t is None:
             t = torch.rand(input_ids.shape[0], device=input_ids.device)
-        loss_scaling, move_chance = self.noise_schedule(t)
-        if move_chance.ndim == 1:
-            move_chance = move_chance[..., None]
-            loss_scaling = loss_scaling[..., None]
-        xt = self._sample_q_xt(input_ids, move_chance)
+        alpha_t_prime, alpha_t = self.noise_schedule(t)
+        if alpha_t.ndim == 1:
+            alpha_t = alpha_t[..., None]
+            alpha_t_prime = alpha_t_prime[..., None]
+        xt = self._sample_q_xt(input_ids, alpha_t)
 
         permuted_attention_mask = self._permute_attention_mask(
-            input_ids.shape[0], attention_mask)
-        encoder_attention_mask = permuted_attention_mask[:, :self.config.length]
-        decoder_attention_mask = permuted_attention_mask[:, self.config.length:]
+            input_ids.shape[0], attention_mask
+        )
+        encoder_attention_mask = permuted_attention_mask[:, : self.config.length]
+        decoder_attention_mask = permuted_attention_mask[:, self.config.length :]
 
         return DenoiserInput(
             xt=xt,
             x0=input_ids,
             attention_mask=attention_mask,
             t=t,
-            move_chance=move_chance,
-            loss_scaling=loss_scaling,
+            alpha_t=alpha_t,
+            alpha_t_prime=alpha_t_prime,
             kwargs={
                 "encoder_attention_mask": encoder_attention_mask,
                 "decoder_attention_mask": decoder_attention_mask,
             },
         )
-    
+
+
 class BD3LMConfig(D3PMConfig):
     """Configuration class for BD3LM models."""
+
     model_type = "bd3lm"
     auto_map = {
         "AutoConfig": "denoiser.BD3LMConfig",
         "AutoModel": "denoiser.BD3LM",
     }
+
 
 class BD3LM(MDLM):
     def __init__(self, config: MDLMConfig):
@@ -863,17 +878,17 @@ class BD3LM(MDLM):
         self.block_size = config.block_size
         self.attn_backend = config.backbone_config.attn_backend
         if flex_attention is not None:
-            raise ValueError("FlexAttention not available. Please install the latest version of PyTorch.")
+            raise ValueError("FlexAttention not available.")
         self._gen_mask()
 
     def _mask_fn(
-            b: int,
-            h: int,
-            q_idx: torch.Tensor,
-            kv_idx: torch.Tensor,
-            block_size: Union[int, None] = None,
-            n: int | None = None,
-        ) -> Union[torch.Tensor, BlockMask]:
+        b: int,
+        h: int,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        block_size: Union[int, None] = None,
+        n: int | None = None,
+    ) -> Union[torch.Tensor, BlockMask]:
         """
         Constructs the specialized block diffusion attention mask for training
         composed of three masks:
@@ -892,25 +907,23 @@ class BD3LM(MDLM):
         """
 
         # Indicate whether token belongs to xt or x0
-        x0_flag_q = (q_idx >= n)
-        x0_flag_kv = (kv_idx >= n)
+        x0_flag_q = q_idx >= n
+        x0_flag_kv = kv_idx >= n
 
         # Compute block indices
-        block_q = torch.where(x0_flag_q == 1,
-                                (q_idx - n) // block_size,
-                                q_idx // block_size)
-        block_kv = torch.where(x0_flag_kv == 1,
-                                (kv_idx - n) // block_size,
-                                kv_idx // block_size)
+        block_q = torch.where(
+            x0_flag_q == 1, (q_idx - n) // block_size, q_idx // block_size
+        )
+        block_kv = torch.where(
+            x0_flag_kv == 1, (kv_idx - n) // block_size, kv_idx // block_size
+        )
 
         # **1. Block Diagonal Mask (M_BD) **
         block_diagonal = (block_q == block_kv) & (x0_flag_q == x0_flag_kv)
 
         # **2. Offset Block-Causal Mask (M_OBC) **
         offset_block_causal = (
-            (block_q > block_kv)
-            & (x0_flag_kv == 1)
-            & (x0_flag_q == 0)
+            (block_q > block_kv) & (x0_flag_kv == 1) & (x0_flag_q == 0)
         )
 
         # **3. Block-Causal Mask (M_BC) **
@@ -918,17 +931,25 @@ class BD3LM(MDLM):
 
         # **4. Combine Masks **
         return block_diagonal | offset_block_causal | block_causal
-    
+
     def _gen_mask(self):
         if self.attn_backend == "flex":
             self.mask = create_block_mask(
                 partial(self._mask_fn, block_size=self.block_size, n=self.length),
-                B=None, H=None, Q_LEN=self.length*2, KV_LEN=self.length*2)
+                B=None,
+                H=None,
+                Q_LEN=self.length * 2,
+                KV_LEN=self.length * 2,
+            )
         else:
             self.mask = self._mask_fn(
-                b=None, h=None, q_idx=torch.arange(self.length)[:, None], 
+                b=None,
+                h=None,
+                q_idx=torch.arange(self.length)[:, None],
                 kv_idx=torch.arange(self.length)[None, :],
-                block_size=self.block_size, n=self.length)
+                block_size=self.block_size,
+                n=self.length,
+            )
 
     def _prepare_inputs(
         self,
@@ -941,13 +962,12 @@ class BD3LM(MDLM):
         input_ids = input_ids[..., :-1]
         if attention_mask is None:
             attention_mask = self.mask
-       
+
         return DenoiserInput(
             xt=input_ids,
             x0=labels,
             attention_mask=attention_mask,
         )
-
 
     def _backbone_forward(self, denoiser_inputs: DenoiserInput, **kwargs: Any):
         """Forward pass for the backbone model (should return logits).
@@ -966,23 +986,24 @@ class BD3LM(MDLM):
             out = self.backbone(
                 x_full,
                 attention_mask=denoiser_inputs.attention_mask,
-                noise=(1 - denoiser_inputs.move_chance),
+                noise=(1 - denoiser_inputs.alpha_t),
             )
         out = self.backbone(
             x_full, attention_mask=denoiser_inputs.attention_mask, **kwargs
         )
-        return out[:, :denoiser_inputs.xt.size(1)]
+        return out[:, : denoiser_inputs.xt.size(1)]
 
     def _generate_unconditional(
         self,
-        move_chance_t: torch.Tensor,
-        move_chance_s: torch.Tensor,
+        alpha_t: torch.Tensor,
+        alpha_s: torch.Tensor,
         nucleus_p: float,
         denoiser_inputs: DenoiserInput | None = None,
         cache: Dict[str, torch.Tensor] | None = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         raise NotImplementedError
-    
+
+
 # TODO
 # class UDLM(D3PM):
 

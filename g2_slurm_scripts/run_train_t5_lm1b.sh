@@ -19,7 +19,7 @@
 cd ../ || exit  # Go to the root directory of the repo
 source setup_env.sh
 
-composer -n 8 scripts/composer_scripts/train_discrete_denoiser.py \
+composer -n ${SLURM_GPUS_ON_NODE} scripts/composer_scripts/train_discrete_denoiser.py \
   run_name=lm1b-t5-test_ao \
   tokenizer.pretrained_model_name_or_path=bert-base-uncased \
   dataset@train_dataset=lm1b_preprocessed_train \

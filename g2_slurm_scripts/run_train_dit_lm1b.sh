@@ -27,4 +27,5 @@ composer -n ${SLURM_GPUS_ON_NODE} scripts/composer_scripts/train_discrete_denois
   model/backbone@model.config.backbone_config=dit \
   model.config.length=128 \
   training.global_batch_size=512 \
+  composer.trainer.device_train_microbatch_size=64 \
   ~composer.trainer.parallelism_config
