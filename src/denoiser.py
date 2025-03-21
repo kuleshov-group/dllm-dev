@@ -505,6 +505,7 @@ class D3PM(Denoiser):
 
     def _compute_posterior(
         self,
+        x: torch.Tensor,
         xt: torch.Tensor,
         move_chance_t: torch.Tensor,
         move_chance_s: torch.Tensor,
@@ -514,29 +515,30 @@ class D3PM(Denoiser):
             denoising model.
 
         Args:
+            x (torch.Tensor): True (one-hot) / predicted clean signal (B, L, V).
             xt (torch.Tensor): Noised signal at time t (B, L).
             move_chance_t (torch.Tensor): Noise schedule parameter at time t (B, 1, 1).
             move_chance_s (torch.Tensor): Noise schedule parameter at time s (B, 1, 1).
         """
         alpha_t, alpha_s = 1 - move_chance_t, 1 - move_chance_s
         if self.diffusion_type == "absorbing_state":
-            q_xs = xt * (alpha_s - alpha_t)
+            q_xs = x * (alpha_s - alpha_t)
             q_xs[..., self.mask_token_id] = 1 - alpha_s[..., 0]
             q_xs /= 1 - alpha_t
             return q_xs
 
         alpha_ts = alpha_t / alpha_s
         d_alpha = alpha_s - alpha_t
-        xt_one_hot = torch.nn.functional.one_hot(xt, self.vocab_size)
+        xt_one_hot = torch.nn.functional.one_hot(x, self.vocab_size)
         limiting_distribution = torch.ones_like(xt_one_hot) / self.vocab_size
         if self.diffusion_type == "uniform":
             return (
-                alpha_t * self.vocab_size * xt * xt_one_hot
+                alpha_t * self.vocab_size * x * xt_one_hot
                 + (alpha_ts - alpha_t) * xt_one_hot
-                + d_alpha * xt
+                + d_alpha * x
                 + (1 - alpha_ts) * (1 - alpha_s) * limiting_distribution
             ) / (
-                alpha_t * self.vocab_size * torch.gather(xt, -1, xt[..., None])
+                alpha_t * self.vocab_size * torch.gather(x, -1, xt[..., None])
                 + (1 - alpha_t)
             )
         raise NotImplementedError(

@@ -75,7 +75,7 @@ class LinearNoise(Noise):
     return move_chance
     
   def compute_loss_scaling_and_move_chance(self, t):
-    loss_scaling = - 1 / t
+    loss_scaling = 1 / t
     return loss_scaling, t
   
 
