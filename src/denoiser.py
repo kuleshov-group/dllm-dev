@@ -469,7 +469,7 @@ class D3PM(Denoiser):
 
         if t is None:
             t = torch.rand(input_ids.shape[0], device=input_ids.device)
-        alpha_t_prime, alpha_t = self.noise_schedule(t)
+        alpha_t, alpha_t_prime = self.noise_schedule(t)
         if alpha_t.ndim == 1:
             alpha_t = alpha_t[..., None]
             alpha_t_prime = alpha_t_prime[..., None]
@@ -836,7 +836,7 @@ class AnyOrderMDLM(MDLM):
 
         if t is None:
             t = torch.rand(input_ids.shape[0], device=input_ids.device)
-        alpha_t_prime, alpha_t = self.noise_schedule(t)
+        alpha_t, alpha_t_prime = self.noise_schedule(t)
         if alpha_t.ndim == 1:
             alpha_t = alpha_t[..., None]
             alpha_t_prime = alpha_t_prime[..., None]
