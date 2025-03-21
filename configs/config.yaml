@@ -1,13 +1,13 @@
 #file: noinspection LongLine
 defaults:
-  - composer/composer_config@_global_  # Pull in defaults from composer
-  - composer/trainer@trainer
+  - composer: default_composer  # Pull in composer setup defaults
   - tokenizer: autotokenizer
   - collator: denoising
   - dataset@train_dataset: ???
   - dataset@eval_dataset: ???
-  - noise@model.config.noise_config: linear
+  - metrics: [loss, nll, bpd, perplexity]
   - model: mdlm
+  - noise@model.config.noise_config: linear
   - model/backbone@model.config.backbone_config: ???
   - _self_
 
@@ -37,6 +37,7 @@ training:
   lr: 3e-4  # Peak learning rate
   global_batch_size: 512
   eval_global_batch_size: ${.global_batch_size}
+  grad_accum: ${div_up:${training.global_batch_size}, ${eval:${get_world_size:} * ${train_dataloader.batch_size}}}
   # Parameters for sampling t
   antithetic_sampling: True
   sampling_eps: 1e-3

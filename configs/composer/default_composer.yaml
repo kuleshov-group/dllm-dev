@@ -1,0 +1,22 @@
+#file: noinspection LongLine
+# Sets defaults for composer scripts
+defaults:
+  - trainer: trainer
+  - algorithms:
+    - ema
+#    - low_precision_layer_norm
+  - callbacks:
+#      - dataloader_speed_monitor
+      - hf_compatible_checkpointing
+      - lr_monitor
+#      - memory_monitor
+#      - optimizer_monitor
+#      - runtime_estimator
+      - save_best_checkpointing
+      - speed_monitor
+  - loggers: wandb
+  - lr_scheduler: constant_with_warmup
+  - optimizer: decoupled_adamw
+  - compile@trainer.compile_config: pytorch_defaults
+  - parallelism@trainer.parallelism_config: fsdp
+  - _self_

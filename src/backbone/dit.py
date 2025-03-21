@@ -178,6 +178,7 @@ def apply_rotary_emb_torch(x, cos, sin, interleaved=False):
     )
 
 
+@torch.cuda.amp.autocast(dtype=torch.float32)
 def split_and_apply_rotary_pos_emb(
     qkv: Tensor, rotary_cos_sin: tuple[Tensor, Tensor]
 ) -> tuple[Tensor, Tensor, Tensor]:
@@ -375,10 +376,11 @@ class DIT(nn.Module):
         rotary_cos_sin = self.rotary_embed(x)
 
         all_hidden_states = []
-        for block in self.blocks:
-            x = block(x, rotary_cos_sin, c)
-            if output_hidden_states:
-                all_hidden_states.append(x)
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            for block in self.blocks:
+                x = block(x, rotary_cos_sin, c)
+                if output_hidden_states:
+                    all_hidden_states.append(x)
         x = self.output_layer(x, c)
 
         if output_hidden_states:
