@@ -218,7 +218,7 @@ class Denoiser(ABC, PreTrainedModel):
             return self.backbone(
                 denoiser_inputs.xt,
                 attention_mask=denoiser_inputs.attention_mask,
-                noise=(1 - denoiser_inputs.alpha_t),
+                noise=denoiser_inputs.alpha_t,
             )
         return self.backbone(
             denoiser_inputs.xt, attention_mask=denoiser_inputs.attention_mask, **kwargs
@@ -581,7 +581,7 @@ class D3PM(Denoiser):
                 )
         else:
             x_theta = cache["x_theta"]
-        q_xs = self._compute_posterior(x_theta, alpha_t, alpha_s)
+        q_xs = self._compute_posterior(x_theta, denoiser_inputs.xt, alpha_t, alpha_s)
         cache = {"x_theta": x_theta}
         return q_xs, cache
 
@@ -986,7 +986,7 @@ class BD3LM(MDLM):
             out = self.backbone(
                 x_full,
                 attention_mask=denoiser_inputs.attention_mask,
-                noise=(1 - denoiser_inputs.alpha_t),
+                noise=denoiser_inputs.alpha_t,
             )
         out = self.backbone(
             x_full, attention_mask=denoiser_inputs.attention_mask, **kwargs
