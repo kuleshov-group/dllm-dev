@@ -35,5 +35,8 @@ composer -n ${SLURM_GPUS_ON_NODE} scripts/composer_scripts/train_discrete_denois
   eval_dataloader.num_workers=0 \
   model/backbone@model.config.backbone_config.decoder_net=dit \
   model.config.backbone_config.decoder_net.n_blocks=4 \
+  model.config.backbone_config.decoder_net.hidden_size=2048 \
+  model.config.backbone_config.decoder_net.n_heads=32 \
+  model.config.backbone_config.decoder_net.use_adaln=false \
   model.config.backbone_is_decoder_only=false \
   composer.loggers=null
