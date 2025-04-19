@@ -1,3 +1,6 @@
+defaults:
+  - /model/backbone@_global_.model.config.backbone_config.decoder_net: ???
+
 _target_: src.backbone.encoder_decoder.LlamaAsEncoderDecoder
-pretrained_model_name_or_path: ${pretrained_model_name_or_path}
-num_layers_for_encoder: 10
+pretrained_model_name_or_path: TinyLlama/TinyLlama-1.1B-step-50K-105b
+num_layers_for_encoder: 4

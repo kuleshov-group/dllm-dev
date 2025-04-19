@@ -1,4 +1,4 @@
-from typing import Union
+from typing import Any, Union
 
 import torch
 from torch import Tensor, nn
@@ -17,13 +17,34 @@ except ModuleNotFoundError:
 logger = logging.get_logger(__name__)
 
 
+class Decoder(nn.Module):
+    def __init__(self, net: nn.Module):
+        super().__init__()
+        self.net = net
+
+    def forward(
+        self,
+        input_ids: Tensor,
+        noise: Tensor | None,
+        attention_mask: Union[Tensor, BlockMask],
+        **kwargs: Any,
+    ) -> Tensor:
+        x = self.net(
+            input_ids,
+            noise,
+            attention_mask=attention_mask,
+            skip_embedding=True,
+            **kwargs,
+        )
+        return x
+
+
 class LlamaAsEncoderDecoder(nn.Module):
     def __init__(
         self,
         pretrained_model_name_or_path: str,
         num_layers_for_encoder: int,
-        block_size: int,
-        max_length: int,
+        decoder_net: nn.Module,
     ):
         super().__init__()
         # TODO: consider init of decoder layers from scratch
@@ -31,13 +52,12 @@ class LlamaAsEncoderDecoder(nn.Module):
             pretrained_model_name_or_path, trust_remote_code=True
         )  # TODO: try something like this:, attn_implementation="flex")
         self.num_layers_for_encoder = num_layers_for_encoder
-        self.block_size = block_size
-        self.max_length = max_length
+        self.decoder = Decoder(decoder_net)
 
     def forward(
         self,
-        encoder_input_ids: Tensor,
         decoder_input_ids: Tensor,
+        encoder_input_ids: Tensor,
         encoder_attention_mask: Union[Tensor, BlockMask],
         decoder_attention_mask: Union[Tensor, BlockMask],
         past_key_values: Cache | None = None,
@@ -67,6 +87,7 @@ class LlamaAsEncoderDecoder(nn.Module):
         #     past_key_values,
         #     output_attentions,
         # )
+        n = encoder_input_ids.shape[-1]
 
         # Encode clean tokens
         encoder_hidden_states = self.llama.model.embed_tokens(encoder_input_ids)
@@ -76,10 +97,10 @@ class LlamaAsEncoderDecoder(nn.Module):
         encoder_position_embeddings = self.llama.model.rotary_emb(
             encoder_hidden_states, encoder_position_ids
         )
+        # TODO how to pass in encoder attn mask?
         for encoder_layer in self.llama.model.layers[: self.num_layers_for_encoder]:
             encoder_hidden_states = encoder_layer(
                 encoder_hidden_states,
-                attention_mask=encoder_attention_mask,
                 encoder_position_ids=encoder_position_ids,
                 past_key_value=past_key_values,
                 output_attentions=False,
@@ -108,7 +129,11 @@ class LlamaAsEncoderDecoder(nn.Module):
         decoder_position_embeddings = self.llama.model.rotary_emb(
             decoder_hidden_states, decoder_position_ids
         )
-        for decoder_layer in self.llama.model.layers[self.num_layers_for_encoder :]:
+
+        decoder_hidden_states = torch.cat(
+            (decoder_position_embeddings, encoder_hidden_states), dim=1
+        )
+        for decoder_layer in self.decoder.blocks:
             decoder_hidden_states = decoder_layer(
                 decoder_hidden_states,
                 attention_mask=decoder_attention_mask,
@@ -120,8 +145,11 @@ class LlamaAsEncoderDecoder(nn.Module):
                 position_embeddings=decoder_position_embeddings,
                 **flash_attn_kwargs,
             )[0]
+            decoder_hidden_states[:, n:] = encoder_hidden_states
 
         # Only keep logits for masked tokens
-        decoder_hidden_states = [..., decoder_inputs_embeds.shape[1]]
+        decoder_hidden_states = decoder_hidden_states[:, :n]
         decoder_hidden_states = self.llama.model.norm(decoder_hidden_states)
+
+        # Use the same LM head from LLaMA
         return self.llama.lm_head(decoder_hidden_states)

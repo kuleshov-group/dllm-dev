@@ -262,7 +262,9 @@ class Denoiser(ABC, PreTrainedModel):
             t=t,
         )
 
-        backbone_output = self._backbone_forward(denoiser_inputs, **kwargs)
+        backbone_output = self._backbone_forward(
+            denoiser_inputs, **denoiser_inputs.kwargs
+        )
         new_past_key_values = getattr(backbone_output, "past_key_values", None)
         if hasattr(backbone_output, "logits"):
             backbone_output = backbone_output.logits
@@ -785,7 +787,7 @@ class BD3LMConfig(MDLMConfig):
     def __init__(
         self,
         block_size: int,
-        attn_backend: str,
+        attn_backend: str = "sdpa",  # sdpa, flex
         backbone_is_decoder_only: bool = True,
         **kwargs,
     ):
@@ -806,15 +808,43 @@ class BD3LM(MDLM):
         self._create_static_mask()
 
     def _create_static_mask(self) -> None:
+        n = self.config.length
+        block_size = self.config.block_size
+        # Create 2N x 2N decoder mask
+        q_idx = torch.arange(2 * n)[:, None]
+        kv_idx = torch.arange(2 * n)[None, :]
+        # Indicate whether token belongs to xt or x0
+        x0_flag_q = q_idx >= n
+        x0_flag_kv = kv_idx >= n
+
+        # Compute block indices
+        block_q = torch.where(
+            x0_flag_q == 1, (q_idx - n) // block_size, q_idx // block_size
+        )
+        block_kv = torch.where(
+            x0_flag_kv == 1, (kv_idx - n) // block_size, kv_idx // block_size
+        )
+
+        # **1. Block Diagonal Mask (M_BD) **
+        block_diagonal = (block_q == block_kv) & (x0_flag_q == x0_flag_kv)
+
+        # **2. Offset Block-Causal Mask (M_OBC) **
+        offset_block_causal = (
+            (block_q > block_kv) & (x0_flag_kv == 1) & (x0_flag_q == 0)
+        )
+        # **3. Block-Causal Mask (M_BC) **
+        block_causal = (block_q >= block_kv) & (x0_flag_kv == 1) & (x0_flag_q == 1)
         if self.config.backbone_is_decoder_only:
-            # TODO: Generate the 2N x 2N BD3LM mask (use register_buffer)
-            pass
+            # 2N x 2N decoder mask
+            decoder_mask = block_diagonal | offset_block_causal | block_causal
+            self.register_buffer("decoder_attn_mask", decoder_mask)
         else:
-            # TODO:
-            #  Generate N x N block causal enc_mask
-            #  and N X 2N block diag | offset block causal dec_mask
-            #  (use 2 register buffers)
-            pass
+            # N X N encoder mask
+            encoder_mask = block_causal[n:, n:]
+            self.register_buffer("encoder_attn_mask", encoder_mask)
+            # N x 2N decoder mask
+            decoder_mask = block_diagonal[:n] | offset_block_causal[:n]
+            self.register_buffer("decoder_attn_mask", decoder_mask)
 
     def _prepare_inputs(
         self,
@@ -825,17 +855,30 @@ class BD3LM(MDLM):
     ):
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
-
         if self.config.backbone_is_decoder_only:
-            # TODO: attn-mask repeat to 2N x 2N and & it with the static mask
-            pass
+            n = attention_mask.shape[1]
+            attention_mask = attention_mask[..., None]
+            attention_mask = attention_mask.repeat(1, 2, n * 2)
+            decoder_mask = self.decoder_attn_mask.unsqueeze(0)
+            decoder_mask = decoder_mask & attention_mask
+            backbone_kwargs = {"decoder_attention_mask": decoder_mask}
         else:
-            # TODO: attn-mask &-ed with enc_mask
-            # TODO: attn-mask repeat to N x 2N &-ed with dec_mask
-            pass
+            encoder_mask = self.encoder_attn_mask[None, ...] & attention_mask[..., None]
+            attention_mask_decoder = (
+                attention_mask[..., None].transpose(1, 2).repeat(1, 1, 2)
+            )
+            decoder_mask = self.decoder_attn_mask[None, ...] & attention_mask_decoder
+            backbone_kwargs = {
+                "encoder_attention_mask": encoder_mask,
+                "decoder_attention_mask": decoder_mask,
+                "encoder_input_ids": input_ids,
+            }
 
         if t is None:
-            t = torch.rand(input_ids.shape[0], device=input_ids.device)
+            num_blocks = self.config.length // self.config.block_size
+            t = torch.rand(input_ids.shape[0] * num_blocks, device=input_ids.device)
+            t = t.view(-1, num_blocks)
+            t = t.repeat_interleave(self.config.block_size, dim=1)
         alpha_t, alpha_t_prime = self.noise_schedule(t)
         while alpha_t.ndim < 2:
             alpha_t = alpha_t[..., None]
@@ -849,6 +892,7 @@ class BD3LM(MDLM):
             t=t,
             alpha_t=alpha_t,
             alpha_t_prime=alpha_t_prime,
+            kwargs=backbone_kwargs,
         )
 
 
