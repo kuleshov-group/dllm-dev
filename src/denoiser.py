@@ -842,8 +842,8 @@ class BD3LM(MDLM):
             # N X N encoder mask
             encoder_mask = block_causal[n:, n:]
             self.register_buffer("encoder_attn_mask", encoder_mask)
-            # N x 2N decoder mask
-            decoder_mask = block_diagonal[:n] | offset_block_causal[:n]
+            # 2N x 2N decoder mask
+            decoder_mask = block_diagonal | offset_block_causal
             self.register_buffer("decoder_attn_mask", decoder_mask)
 
     def _prepare_inputs(
@@ -863,9 +863,10 @@ class BD3LM(MDLM):
             decoder_mask = decoder_mask & attention_mask
             backbone_kwargs = {"decoder_attention_mask": decoder_mask}
         else:
+            n = attention_mask.shape[1]
             encoder_mask = self.encoder_attn_mask[None, ...] & attention_mask[..., None]
             attention_mask_decoder = (
-                attention_mask[..., None].transpose(1, 2).repeat(1, 1, 2)
+                attention_mask[..., None].transpose(1, 2).repeat(1, n * 2, 2)
             )
             decoder_mask = self.decoder_attn_mask[None, ...] & attention_mask_decoder
             backbone_kwargs = {

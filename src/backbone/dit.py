@@ -12,7 +12,11 @@ from torch import Tensor, nn
 
 
 def multi_head_attention(
-    q: Tensor, k: Tensor, v: Tensor, is_causal: bool = False
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    is_causal: bool = False,
+    attention_mask: Tensor | None = None,
 ) -> Tensor:
     # Assuming qkv is a tensor with shape [batch, seq_len, 3, num_heads, head_dim]
     # where the 3 represents Q, K, V packed in that order
@@ -20,7 +24,7 @@ def multi_head_attention(
         query=q.transpose(1, 2),
         key=k.transpose(1, 2),
         value=v.transpose(1, 2),
-        attn_mask=None,
+        attn_mask=attention_mask,
         dropout_p=0.0,
         is_causal=is_causal,
     )
@@ -216,7 +220,11 @@ class DDiTBlock(nn.Module):
             self.adaln.bias.data.zero_()
 
     def forward(
-        self, x: Tensor, rotary_cos_sin: tuple[Tensor, Tensor], c: Tensor | None = None
+        self,
+        x: Tensor,
+        rotary_cos_sin: tuple[Tensor, Tensor],
+        c: Tensor | None = None,
+        attention_mask: Tensor | None = None,
     ) -> Tensor:
         """Forward pass for a single DDiT block.
 
@@ -246,7 +254,9 @@ class DDiTBlock(nn.Module):
         )
         q, k, v = split_and_apply_rotary_pos_emb(qkv, rotary_cos_sin)
 
-        x = multi_head_attention(q, k, v, is_causal=self.causal)
+        x = multi_head_attention(
+            q, k, v, is_causal=self.causal, attention_mask=attention_mask
+        )
 
         x = self.attn_out(x)
         x = gate_msa * self.dropout1(x) + x_skip
@@ -328,7 +338,11 @@ class DIT(nn.Module):
         )
 
     def forward(
-        self, input_ids: Tensor, noise: Tensor | None = None, **_: Any
+        self,
+        input_ids: Tensor,
+        noise: Tensor | None = None,
+        attention_mask: Tensor | None = None,
+        **_: Any,
     ) -> Tensor:
         """Forward pass for DIT model.
 
@@ -346,7 +360,7 @@ class DIT(nn.Module):
 
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             for block in self.blocks:
-                x = block(x, rotary_cos_sin, c)
+                x = block(x, rotary_cos_sin, c, attention_mask=attention_mask)
 
         x = self.output_layer(x, c)
 
