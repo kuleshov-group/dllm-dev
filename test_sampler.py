@@ -12,34 +12,42 @@ register_useful_resolvers()
 CKPT_DIR = "/share/kuleshov/ma2238/runs/dllm-dev/"
 
 # RUN_NAME="gsm8k-block4-bs96-keep4-causalencfalse-max20000ba-lr1e-4-warmup1000ba-gc1.0-wd1e-5-e2d2_phi_v1"
-RUN_NAME = "gsm8k-block4-bs96-keep2-causalencfalse-max20000ba-lr1e-4-warmup1000ba-gc1.0-wd1e-5-bd3_phi_v1"
-
+RUN_NAME = "/home/ubuntu/runs/dllm-dev/gsm8k-block4-bs96-keep4-causalencfalse-max20000ba-lr1e-4-warmup1000ba-gc1.0-wd1e-5-e2d2_phi_v2" # actually v1
 # E2D2
 base_config = OmegaConf.load(os.path.join(CKPT_DIR, RUN_NAME, "config.yaml"))
 overrides = [
     "composer.loggers=null",
-    "model.config.sampler_config.config.block_size=4",
-    "model.config.sampler_config.config.first_hitting=true",
-    "model.config.sampler_config.config.use_x0_pred=true",
-    "model.config.sampler_config.config.greedy=true",
-    "model.config.sampler_config.config.low_confidence_remasking=true",
+    "model.config.sampler_config.block_size=4",
+    "model.config.sampler_config.first_hitting=true",
+    "model.config.sampler_config.use_x0_pred=true",
+    "model.config.sampler_config.greedy=true",
+    "model.config.sampler_config.low_confidence_remasking=true",
+    "model.config.sampler_config.disable_cache=false",
+    "model.config.sampler_config.kv_caching=false",
+    "model.config.sampler_config.min_t=1e-5",
+    "model.config.sampler_config.shift_logies=true",
+    "model.config.sampler_config.top_p=0.85",
+    "model.config.sampler_config.num_steps=1000",
+    "model.config.sampler_config.pad_context=false",
 ]
 config = OmegaConf.merge(base_config, OmegaConf.from_dotlist(overrides))
 
 ckpt_file = (
-    f"/share/kuleshov/ma2238/runs/dllm-dev/${RUN_NAME}/checkpoints/best-rank0.pt"
+    f"{RUN_NAME}/checkpoints/best-rank0.pt"
 )
 
 model = hydra.utils.instantiate(
     config.model,
     _convert_="all",
-).to("cuda")
+)
 model.eval()
 
 ckpt = torch.load(ckpt_file, weights_only=False)
 state_dict = ckpt["state"]["model"]
 torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, "model.")
 model.load_state_dict(state_dict)
+
+# model.to('cuda')
 
 tokenizer = AutoTokenizer.from_pretrained(
     config.tokenizer.pretrained_model_name_or_path,
@@ -51,7 +59,7 @@ prompt = tokenizer(
     return_tensors="pt",
     padding=True,
     truncation=True,
-).to("cuda")
+).to(model.device)
 
 """
 Janet sells 16 - 3 - 4 = <<16-3-4=9>>9 duck eggs a day.
@@ -64,9 +72,8 @@ end = torch.cuda.Event(enable_timing=True)
 start.record()
 
 samples, NFEs = model.generate(
-    batch_size=1, max_seq_len=512, context=prompt["input_ids"]
+    batch_size=1, max_length=512, context=prompt["input_ids"]
 )
-
 end.record()
 torch.cuda.synchronize()
 print(f"Time taken: {start.elapsed_time(end)} ms")
