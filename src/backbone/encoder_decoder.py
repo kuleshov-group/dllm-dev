@@ -74,18 +74,13 @@ class LLMasEncoderDecoder(nn.Module):
                 )
 
         # delete layers from encoder / decoder
-        if keep_every_n_encoder_layers < len(self.encoder.model.layers):
+        if keep_every_n_encoder_layers > 1:
             encoder_layers_post_surgery = []
             for i, encoder_layer in enumerate(self.encoder.model.layers):
                 if (i + 1) % keep_every_n_encoder_layers == 0:
                     encoder_layers_post_surgery.append(encoder_layer)
             self.encoder.model.layers = nn.ModuleList(encoder_layers_post_surgery)
-        if not tie_encoder_decoder_weights:
-            del self.encoder.lm_head
-        if (
-            keep_every_n_decoder_layers < len(self.decoder.model.layers)
-            and not tie_encoder_decoder_weights
-        ):
+        if keep_every_n_decoder_layers > 1 and not tie_encoder_decoder_weights:
             decoder_layers_post_surgery = []
             for i, decoder_layer in enumerate(self.decoder.model.layers):
                 if (i + 1) % keep_every_n_decoder_layers == 0:
@@ -96,6 +91,14 @@ class LLMasEncoderDecoder(nn.Module):
         self.tie_encoder_decoder_weights = tie_encoder_decoder_weights
         if not tie_encoder_decoder_weights:
             del self.decoder.model.embed_tokens
+            del self.decoder.model.norm
+            del self.decoder.model.rotary_emb
+            # if lm head is weight-tied to embedding, point decoder lm head to encoder
+            # (instead of initializing a separate lm head)
+            if "lm_head.weight" not in dict(self.encoder.named_parameters()):
+                self.decoder.lm_head = self.encoder.lm_head
+            else:
+                del self.encoder.lm_head
         self.max_length = max_length
 
     def forward(
@@ -121,9 +124,13 @@ class LLMasEncoderDecoder(nn.Module):
             if self.use_encoder_causal_mask:
                 encoder_attention_mask = None  # must use causal mask
             if encoder_attention_mask is not None:
-                encoder_attention_mask = encoder_attention_mask[:, None, ...].to(self.encoder.dtype)
+                encoder_attention_mask = encoder_attention_mask[:, None, ...].to(
+                    self.encoder.dtype
+                )
                 min_dtype = torch.finfo(self.encoder.dtype).min
-                encoder_attention_mask = torch.where(encoder_attention_mask == 0., min_dtype, 0.)
+                encoder_attention_mask = torch.where(
+                    encoder_attention_mask == 0.0, min_dtype, 0.0
+                )
             past_key_values = self.encoder.model(
                 input_ids=encoder_input_ids,
                 attention_mask=encoder_attention_mask,
@@ -142,37 +149,44 @@ class LLMasEncoderDecoder(nn.Module):
             position_ids = torch.arange(
                 input_ids.shape[1], device=input_ids.device
             ).unsqueeze(0)
-        decoder_position_embeddings = self.decoder.model.rotary_emb(
+        decoder_position_embeddings = self.encoder.model.rotary_emb(
             decoder_hidden_states, position_ids
         )
 
         if cache_position is None:
-            past_seen_tokens = past_key_values.get_seq_length() if past_key_values is not None else 0
-            cache_position = torch.arange(
-                past_seen_tokens, past_seen_tokens + decoder_hidden_states.shape[1], device=decoder_hidden_states.device
+            past_seen_tokens = (
+                past_key_values.get_seq_length() if past_key_values is not None else 0
             )
-        
+            cache_position = torch.arange(
+                past_seen_tokens,
+                past_seen_tokens + decoder_hidden_states.shape[1],
+                device=decoder_hidden_states.device,
+            )
+
         attention_mask = attention_mask[:, None, ...].to(self.decoder.dtype)
         min_dtype = torch.finfo(self.encoder.dtype).min
-        attention_mask = torch.where(attention_mask == 0., min_dtype, 0.)
+        attention_mask = torch.where(attention_mask == 0.0, min_dtype, 0.0)
         attention_mask = self.decoder.model._update_causal_mask(
             attention_mask=attention_mask,
             input_tensor=decoder_hidden_states,
             cache_position=cache_position,
-            past_key_values=past_key_values, 
-            output_attentions=False
+            past_key_values=past_key_values,
+            output_attentions=False,
         )
 
-        for i, decoder_layer in enumerate(self.decoder.model.layers):
+        for decoder_layer in self.decoder.model.layers:
+            layer_idx = decoder_layer.self_attn.layer_idx
             if (
                 self.tie_encoder_decoder_weights
-                and (i + 1) % self.keep_every_n_decoder_layers != 0
+                and (layer_idx + 1) % self.keep_every_n_decoder_layers != 0
             ):
                 continue
             if past_key_values is not None:
-                prev_cache_len = past_key_values.get_seq_length()
-            # TODO maybe adopt gradient checkpointing from transformers
+                prev_cache_len = past_key_values[layer_idx][0].shape[-2]
+            else:
+                prev_cache_len = 0
 
+            # TODO maybe adopt gradient checkpointing from transformers
             # cross-attend to encoder kvs
             decoder_hidden_states = decoder_layer(
                 hidden_states=decoder_hidden_states,
@@ -188,13 +202,12 @@ class LLMasEncoderDecoder(nn.Module):
             if past_key_values is not None:
                 # DynamicCache extends along sequence dimension by default
                 # truncating back to original, encoder output length
-                layer_idx = decoder_layer.self_attn.layer_idx
-                past_key_values.key_cache[layer_idx] = past_key_values.key_cache[layer_idx][
-                    ..., :prev_cache_len, :
-                ]
-                past_key_values.value_cache[layer_idx] = past_key_values.value_cache[layer_idx][
-                    ..., :prev_cache_len, :
-                ]
-        decoder_hidden_states = self.decoder.model.norm(decoder_hidden_states)
+                past_key_values.key_cache[layer_idx] = past_key_values.key_cache[
+                    layer_idx
+                ][..., :prev_cache_len, :]
+                past_key_values.value_cache[layer_idx] = past_key_values.value_cache[
+                    layer_idx
+                ][..., :prev_cache_len, :]
+        decoder_hidden_states = self.encoder.model.norm(decoder_hidden_states)
         decoded_tokens = self.decoder.lm_head(decoder_hidden_states)
         return decoded_tokens
