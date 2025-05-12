@@ -7,7 +7,6 @@ from dataclasses import dataclass, field
 from functools import partial
 from pathlib import Path
 from typing import Any, Dict, Literal, Optional, Tuple
-import re
 
 import hydra.utils
 import torch
@@ -18,7 +17,7 @@ from transformers import (
     PretrainedConfig,
     PreTrainedModel,
     PreTrainedTokenizer,
-    StoppingCriteriaList
+    StoppingCriteriaList,
 )
 from transformers.cache_utils import DynamicCache
 from transformers.modeling_outputs import ModelOutput
@@ -971,10 +970,13 @@ class D3PM(Denoiser):
             batch_size=batch_size,
             length=max_blocks * block_size,
         )
-        
-        if context is not None:
-            accumulated_samples[:, : context_len] = context
 
+        if context is not None:
+            accumulated_samples[:, :context_len] = context
+
+        start_event = torch.cuda.Event(enable_timing=True)
+        end_event = torch.cuda.Event(enable_timing=True)
+        start_event.record()
         if self.sampler_config.kv_caching and context is not None:
             past_key_values = DynamicCache()
             blocks_to_cache = context_len // block_size
@@ -988,8 +990,14 @@ class D3PM(Denoiser):
                 context=accumulated_samples[:, :cache_len],
                 past_key_values=past_key_values,
             )
-
-        block_pbar = tqdm(range(blocks_to_cache, max_blocks), desc="Sampling blocks", leave=False)
+        end_event.record()
+        torch.cuda.synchronize()
+        print(
+            f"Cache context took {start_event.elapsed_time(end_event) / 1000:.2f} seconds"
+        )
+        block_pbar = tqdm(
+            range(blocks_to_cache, max_blocks), desc="Sampling blocks", leave=False
+        )
         for block_id in block_pbar:
             block_NFEs = 0
             xt = accumulated_samples[
@@ -1006,6 +1014,8 @@ class D3PM(Denoiser):
                 if block_id > 0
                 else None
             )
+
+            start_event.record()
 
             for t in step_bar:
                 if cache is None:
@@ -1049,21 +1059,34 @@ class D3PM(Denoiser):
             accumulated_samples[
                 :, (block_id * block_size) + 1 : ((block_id + 1) * block_size) + 1
             ] = xt[:, 1:]
+            end_event.record()
+            torch.cuda.synchronize()
+            print(
+                f"Sampled block {block_id} took {start_event.elapsed_time(end_event) / 1000:.2f} seconds"
+            )
             if tokenizer is not None:
                 print(tokenizer.batch_decode(accumulated_samples))
             if stopping_criteria is not None:
                 stop_criteria_met = stopping_criteria(
-                    input_ids=accumulated_samples, 
-                    scores=None)
+                    input_ids=accumulated_samples, scores=None
+                )
                 if stop_criteria_met:
-                    accumulated_samples = accumulated_samples[:, :((block_id + 1) * block_size) + 1]
+                    accumulated_samples = accumulated_samples[
+                        :, : ((block_id + 1) * block_size) + 1
+                    ]
                     break
             if self.sampler_config.kv_caching:
+                start_event.record()
                 if self.config.shift_logits:
                     xt = xt[:, :-1]
                 past_key_values = self.update_kv_cache(
                     context=xt,
                     past_key_values=past_key_values,
+                )
+                end_event.record()
+                torch.cuda.synchronize()
+                print(
+                    f"Cache block {block_id} took {start_event.elapsed_time(end_event) / 1000:.2f} seconds"
                 )
         return accumulated_samples, total_NFEs
 
