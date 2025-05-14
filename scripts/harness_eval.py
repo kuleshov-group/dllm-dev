@@ -97,6 +97,7 @@ class LMEvalHarness(LM):
         max_length: int | None = None,  # Default to model config, if None
         block_size: int | None = None,  # Default to model config, if None
         shift_logits: bool | None = None,  # Default to model config, if None
+        profiling_flag: bool = False,
     ):
         """
         Args:
@@ -179,6 +180,7 @@ class LMEvalHarness(LM):
             else self.model.config.shift_logits,
         )
         self.model.sampler_config = self.sampler_config
+        self.profiling_flag = profiling_flag
 
     @property
     def rank(self):
@@ -231,12 +233,18 @@ class LMEvalHarness(LM):
 
         res = []
         res_for_json = []
+        throughputs = []
         correct, total = 0, 0
         for i, elem in tqdm(
             enumerate(ds), desc="Generating", total=len(ds), disable=(self.rank != 0)
         ):
             prefix = elem["prefix"][:-1]
-            stopping_criteria = StoppingCriteriaList([boxed_stopping_criteria])
+            # stopping_criteria = StoppingCriteriaList([boxed_stopping_criteria])
+            stopping_criteria = None
+            if self.profiling_flag:
+                start_event = torch.cuda.Event(enable_timing=True)
+                end_event = torch.cuda.Event(enable_timing=True)
+                start_event.record()
             if not self.hf_model:
                 sample, _ = self.model.generate(
                     max_length=len(prefix) + self.max_cont_length,
@@ -244,6 +252,8 @@ class LMEvalHarness(LM):
                     device=self.device,
                     stopping_criteria=stopping_criteria,
                     disable_pbar=(self.rank != 0),
+                    eos_token_id=None,
+                    pad_token_id=None,
                     # tokenizer=self.tokenizer,
                 )
             else:
@@ -254,6 +264,17 @@ class LMEvalHarness(LM):
                     stopping_criteria=stopping_criteria,
                     top_k=None,
                 )
+            if self.profiling_flag:
+                end_event.record()
+                torch.cuda.synchronize()
+                elapsed_time_s = start_event.elapsed_time(end_event) / 1000
+                if total > 10:
+                    throughputs.append(
+                        sample[:, len(prefix):][0].numel() / elapsed_time_s
+                    )
+                if len(throughputs) >= 20:
+                    break
+
             result = self.tokenizer.decode(sample[0, len(elem["prefix"]) :])
             for until in elem["target"]["until"] + [
                 "<|eot_id|>",
@@ -287,6 +308,10 @@ class LMEvalHarness(LM):
             torch.cuda.empty_cache()
             if self.rank == 0:
                 print(f"\nAccuracy: {correct}/{total} = {correct / total:.2%}\n")
+                if self.profiling_flag == True:
+                    mean_throughput = np.mean(throughputs)
+                    std_throughput = np.std(throughputs)
+                    print(f"Throughput (tok/s): {mean_throughput} +/- {std_throughput}")
 
         if not os.path.exists(self.generated_samples_path):
             os.mkdir(self.generated_samples_path)
@@ -298,6 +323,8 @@ class LMEvalHarness(LM):
                 indent=2,
             )
         print(f"RANK {self.rank} completed!")
+        if self.profiling_flag == True:
+            print(f"Final Throughput (tok/s): {mean_throughput} +/- {std_throughput}")
         return res
 
 

@@ -5,9 +5,9 @@ source setup_env.sh
 NUM_VISIBLE_DEVICES=$(echo $CUDA_VISIBLE_DEVICES | awk -F',' '{print NF}')
 
 # Important variables (fix during hyperparam sweep)
-BLOCK_SIZE=4
+BLOCK_SIZE=1
 KEEP_EVERY_N_ENCODER_LAYERS=1 # keep as 1
-KEEP_BOTTOM_N_ENCODER_LAYERS=21 # use < 28
+KEEP_BOTTOM_N_ENCODER_LAYERS=28 # use < 28
 USE_ENCODER_CAUSAL_MASK=false # true, false
 
 # Hyperparameters
@@ -20,7 +20,7 @@ MAX_DURATION="20000ba" # 20000ba, 10000ba, 5000ba
 
 PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-1.7B-Base # Qwen/Qwen3-0.6B-Base, Qwen/Qwen3-1.7B-Base, microsoft/Phi-4-mini-reasoning
 
-TAG=bd3_small_qwen2B_v4
+TAG=bd3_small_qwen2B_vdebug
 RUN_NAME=gsm8k-block${BLOCK_SIZE}-bs${BATCH_SIZE}-keepbottom${KEEP_BOTTOM_N_ENCODER_LAYERS}-causalenc${USE_ENCODER_CAUSAL_MASK}-max${MAX_DURATION}-lr${LR}-warmup${WARMUP_DURATION}-gc${GRAD_CLIP}-wd${WEIGHT_DECAY}-${TAG}
 
 MICRO_BATCH_SIZE=2 # TODO: tune
@@ -54,4 +54,5 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   hydra.run.dir=/home/ubuntu/runs/dllm-dev/${RUN_NAME} \
   composer.trainer.save_interval="1ep" \
   composer.loggers.name=${RUN_NAME} \
-  train_dataloader.num_workers=${NUM_WORKERS}
+  train_dataloader.num_workers=${NUM_WORKERS} \
+  composer.loggers=null

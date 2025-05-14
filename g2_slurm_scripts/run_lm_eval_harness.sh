@@ -36,7 +36,8 @@ FIRST_HITTING=True
 LOW_CONFIDENCE_REMASKING=True
 KV_CACHING=True
 TOP_P=1.0
-CKPT_FILE="best-rank0.pt"
+CKPT_FILE="dummy.pt"
+PROFILING_FLAG=True
 
 OUTPUT_PATH="${OUTPUT_DIR}/L-${L}-block_size-${BLOCK_SIZE}-greedy-${GREEDY}-use_x0_pred-${USE_X0_PRED}-first_hitting-${FIRST_HITTING}-low_confidence_remasking-${LOW_CONFIDENCE_REMASKING}"
 mkdir -p ${OUTPUT_PATH}
@@ -70,4 +71,5 @@ disable_cache=False,\
 kv_caching=${KV_CACHING},\
 max_length=768,\
 block_size=${BLOCK_SIZE},\
-shift_logits=True"
+shift_logits=True,\
+profiling_flag=True"
