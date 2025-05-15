@@ -333,9 +333,9 @@ class Denoiser(ABC, PreTrainedModel):
 
     def _sample_categorical(self, categorical_probs):
         """Helper function to sample from a categorical distribution."""
-        categorical_probs = categorical_probs.to(torch.float64)
         if self.sampler_config.greedy:
             return categorical_probs.argmax(dim=-1)
+        categorical_probs = categorical_probs.to(torch.float64)
         gumbel_norm = (1e-10 - (torch.rand_like(categorical_probs) + 1e-10).log()).to(
             categorical_probs.dtype
         )
@@ -1166,14 +1166,8 @@ class MDLM(D3PM):
         if self.config.shift_logits:
             backbone_output = backbone_output[:, :-1, ...]
         # Zero-mask probability
-        mask = (
-            torch.arange(backbone_output.shape[-1], device=backbone_output.device)
-            == self.mask_token_id
-        ).view(1, 1, -1)  # unsqueeze for broadcast to (batch, seq_len, vocab_size)
-        log_probs = torch.where(
-            mask, backbone_output + self.neg_infinity, backbone_output
-        )
-        log_probs = log_probs - torch.logsumexp(log_probs, dim=-1, keepdim=True)
+        backbone_output[..., self.mask_token_id] = self.neg_infinity
+        log_probs = backbone_output - torch.logsumexp(backbone_output, dim=-1, keepdim=True)
         # Copy-over unmasked: For the log_probs of the unmasked tokens, set all values
         # to -infinity except for the indices corresponding to
         # the unmasked tokens.
@@ -1508,10 +1502,9 @@ class BD3LM(MDLM):
             position_ids = torch.arange(context_len, full_seq_len).to(device)[None, :]
         if input_ids is not None:
             # TODO for profiling index the attn mask
-            decoder_attention_mask = torch.ones(
-                (batch_size, input_ids.shape[1], full_seq_len),
-                device=device,
-            )
+            decoder_attention_mask = self.encoder_static_attention_mask[
+                None, -input_ids.shape[1]:, :full_seq_len
+            ]
         else:
             decoder_attention_mask = None
         return DenoiserInput(
