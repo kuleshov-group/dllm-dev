@@ -31,6 +31,7 @@ class LLMasEncoderDecoder(nn.Module):
         tie_encoder_decoder_weights: bool = False,
         use_encoder_causal_mask: bool = False,
         keep_top_n_decoder_layers: int = -1,
+        keep_bottom_n_encoder_layers: int = -1,
     ):
         assert keep_every_n_encoder_layers <= keep_every_n_decoder_layers, (
             "Cannot remove more encoder than decoder layers."
@@ -90,12 +91,16 @@ class LLMasEncoderDecoder(nn.Module):
             if keep_top_n_decoder_layers == -1
             else keep_top_n_decoder_layers
         )
-        if keep_every_n_encoder_layers > 1:
-            encoder_layers_post_surgery = []
-            for i, encoder_layer in enumerate(self.encoder.model.layers):
-                if (i + 1) % keep_every_n_encoder_layers == 0:
-                    encoder_layers_post_surgery.append(encoder_layer)
-            self.encoder.model.layers = nn.ModuleList(encoder_layers_post_surgery)
+        keep_bottom_n_encoder_layers = (
+            len(self.encoder.model.layers)
+            if keep_bottom_n_encoder_layers == -1
+            else keep_bottom_n_encoder_layers
+        )
+        encoder_layers_post_surgery = []
+        for i, encoder_layer in enumerate(self.encoder.model.layers[:keep_bottom_n_encoder_layers]):
+            if (i + 1) % keep_every_n_encoder_layers == 0:
+                encoder_layers_post_surgery.append(encoder_layer)
+        self.encoder.model.layers = nn.ModuleList(encoder_layers_post_surgery)
         if not tie_encoder_decoder_weights:
             decoder_layers_post_surgery = []
             for i, decoder_layer in enumerate(
