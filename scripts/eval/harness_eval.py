@@ -4,7 +4,6 @@ This file is inspired by the code from https://github.com/ML-GSAI/SMDM
 
 import json
 import os
-import re
 from typing import Any, List, Tuple
 
 import accelerate
@@ -19,7 +18,6 @@ from transformers import (
     AutoModelForCausalLM,
     AutoModelForMaskedLM,
     PreTrainedTokenizer,
-    StoppingCriteria,
 )
 
 from datasets import Dataset
@@ -29,22 +27,8 @@ from scripts.utils import (
     register_useful_resolvers,
     set_seed,
 )
-
-
-class RegexStoppingCriteria(StoppingCriteria):
-    def __init__(self, tokenizer, pattern):
-        self.tokenizer = tokenizer
-        self.pattern = pattern
-
-    def __call__(
-        self, input_ids: torch.LongTensor, scores: None | torch.FloatTensor, **kwargs
-    ) -> bool:
-        if input_ids.numel() == 0:
-            return False
-        matches = re.findall(self.pattern, self.tokenizer.decode(input_ids[0]))
-        if len(matches) > 1:
-            return True
-        return False
+from src.denoiser.diffusion import BD3LM
+from src.utils import fsspec_exists
 
 
 class LMEvalHarnessModel(LM):
@@ -57,6 +41,7 @@ class LMEvalHarnessModel(LM):
         load_ema_weights: bool = False,
         ckpt_file: str = "best-rank0.pt",  # best-rank0.pt or latest-rank0.pt
         gen_kwargs: Any | None = None,
+        accelerator: accelerate.Accelerator | None = None,
     ):
         """
         Args:
@@ -76,15 +61,8 @@ class LMEvalHarnessModel(LM):
         self.generated_samples_output_path = (
             f"{generated_samples_output_path}/lm_eval_harness_output"
         )
-        accelerator = accelerate.Accelerator()
-        if accelerator.num_processes > 1:
-            self.accelerator = accelerator
-        else:
-            self.accelerator = None
-
-        model_kwargs = {}
+        self.accelerator = accelerator
         if self.accelerator is not None:
-            model_kwargs.update({"device_map": {"": f"{self.accelerator.device}"}})
             device = self.accelerator.device
             self._rank = self.accelerator.local_process_index
             self._world_size = self.accelerator.num_processes
@@ -94,13 +72,13 @@ class LMEvalHarnessModel(LM):
             self._world_size = 1
         self.device = torch.device(f"{device}")
 
-        try:
+        if fsspec_exists(os.path.join(pretrained_model_name_or_path, "config.yaml")):
             model = load_model_from_ckpt_dir_path(
                 path_to_ckpt_dir=pretrained_model_name_or_path,
                 load_ema_weights=load_ema_weights,
                 ckpt_file=ckpt_file,
             )
-        except FileNotFoundError:
+        else:
             try:
                 model = AutoModelForCausalLM.from_pretrained(
                     pretrained_model_name_or_path,
@@ -113,7 +91,10 @@ class LMEvalHarnessModel(LM):
                     trust_remote_code=True,
                     revision=pretrained_model_revision,
                 )
-        self.model = model.to(self.device)
+        # TODO: HACK FOR DEBUGGING
+        new_model = BD3LM(model.config)
+        new_model.load_state_dict(model.state_dict())
+        self.model = new_model.to(self.device)  # model.to(self.device)
         self.model.eval()
         self.tokenizer = tokenizer
         self.gen_kwargs = gen_kwargs
@@ -168,10 +149,14 @@ class LMEvalHarnessModel(LM):
         for i, elem in tqdm(
             enumerate(ds), desc="Generating", total=len(ds), disable=(self.rank != 0)
         ):
+            # TODO: DEBUGGING TEST TO SEE IF NEURIPS SNAPSHOT IS REPRODUCIBLE
+            # prefix = elem["prefix"][:-1]
             sample = self.model.generate(
+                # TODO: DEBUGGING TEST TO SEE IF NEURIPS SNAPSHOT IS REPRODUCIBLE
+                # inputs=prefix[None, ...].to(self.device),
                 inputs=elem["prefix"][None, ...].to(self.device),
                 disable_pbar=(self.rank != 0),
-                # tokenizer=self.tokenizer,
+                # tokenizer=self.tokenizer,  # Uncomment for debugging
                 **self.gen_kwargs,
             )
             result = self.tokenizer.decode(sample[0, len(elem["prefix"]) :])
@@ -223,10 +208,16 @@ class LMEvalHarnessModel(LM):
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="eval_config")
 def main(cfg: DictConfig) -> None:
-    print_and_save_config(cfg, resolve=True, save_cfg=False)
+    accelerator = accelerate.Accelerator()
+    accelerator = accelerate.Accelerator() if accelerator.num_processes > 1 else None
+    if accelerator is None or accelerator.local_process_index == 0:
+        print_and_save_config(cfg, resolve=True, save_cfg=False)
     set_seed(cfg.seed)
-    results = hydra.utils.call(cfg.task)
-    if results is not None:
+    model = hydra.utils.instantiate(cfg.task.model, accelerator=accelerator)
+    results = hydra.utils.call(cfg.task, model=model)
+    if results is not None and (
+        accelerator is None or accelerator.local_process_index == 0
+    ):
         samples = results.pop("samples")
         evaluation_tracker = EvaluationTracker(output_path=cfg.output_path)
         evaluation_tracker.save_results_aggregated(results=results, samples=samples)

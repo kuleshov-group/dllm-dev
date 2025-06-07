@@ -15,10 +15,11 @@ from transformers.modeling_outputs import ModelOutput
 try:
     from torch.nn.attention.flex_attention import (
         BlockMask,
+        and_masks,
         create_block_mask,
     )
 except ImportError:
-    BlockMask, create_block_mask = None, None
+    BlockMask, and_masks, create_block_mask = None, None, None
 
 
 from src.denoiser.base import (
@@ -31,13 +32,16 @@ from src.denoiser.base import (
 
 def preprocess_attention_mask(attention_mask, dtype):
     min_dtype = torch.finfo(dtype).min
-    attention_mask = torch.where((attention_mask == 0.0).bool(), min_dtype, 0.0).to(
-        dtype
-    )
+    attention_mask = torch.where(
+        (attention_mask == 0.0).bool(),  # type: ignore
+        min_dtype,
+        0.0,
+    ).to(dtype)
     return attention_mask
 
 
 def create_attn_mask(attn_mask):
+    # noinspection PyUnusedLocal
     def padding(b, h, q_idx, kv_idx):
         return attn_mask[b, q_idx] & attn_mask[b, kv_idx]
 
@@ -53,6 +57,7 @@ class DiffusionGenerationConfig(GenerationConfig):
         first_hitting: bool = False,
         sampling_strategy: Literal["posterior", "predict_then_noise"] = "posterior",
         confidence_based_noising: bool = False,
+        confidence_threshold: float = 1.0,
         use_model_output_cache: bool = True,
         **kwargs,
     ):
@@ -84,6 +89,7 @@ class DiffusionGenerationConfig(GenerationConfig):
                         q(x_s | x_t, x_theta).
                     - "predict_then_noise" - Sample from the denoising model x_theta,
                         then add back noise to produce x_s.
+                        Only implemented for absorbing diffusion.
                 Defaults to "posterior".
             confidence_based_noising (bool): When using the "predict_then_noise"
                 strategy, whether to add noise to random positions or to those that have
@@ -103,9 +109,10 @@ class DiffusionGenerationConfig(GenerationConfig):
         self.block_size = block_size if block_size is not None else self.max_new_tokens
         self.first_hitting = first_hitting
         if self.first_hitting:
-            self.num_steps = self.block_size
+            self.num_steps = self.block_size  # TODO: min(num_steps, self.block_size)?
         self.sampling_strategy = sampling_strategy
         self.confidence_based_noising = confidence_based_noising
+        self.confidence_threshold = confidence_threshold
         self.use_model_output_cache = use_model_output_cache
 
 
@@ -301,7 +308,7 @@ class D3PM(Denoiser):
         max_length: int | None = None,
         device: str | None = None,
     ) -> torch.FloatTensor:
-        """Sample timesteps for the diffusion process."""
+        """Sample timesteps for diffusion generation process."""
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         if max_length is None:
@@ -318,15 +325,14 @@ class D3PM(Denoiser):
                 next_t = timesteps[-1] * u ** (1 / i)
                 timesteps = torch.cat((timesteps, next_t), dim=0)
             return timesteps[1:].to(device)  # type: ignore
-        timesteps = torch.linspace(
+        return torch.linspace(  # type: ignore
             1.0,
             generation_config.min_t,
             generation_config.num_steps + 1,
             device=device,
-        )
-        return timesteps  # type: ignore
+        )[:-1]
 
-    def _generate_unconditional(  # TODO add CBG and CFG generation
+    def _generate_unconditional(  # TODO: add CBG and CFG generation
         self,
         generation_config: DiffusionGenerationConfig,
         alpha_t: torch.FloatTensor,
@@ -347,7 +353,11 @@ class D3PM(Denoiser):
             ):
                 backbone_output = backbone_output.logits
             log_x_theta = self._forward(backbone_output, denoiser_inputs, **kwargs)
-            if logits_processor is not None and running_generation is not None:
+            if (
+                logits_processor is not None
+                and running_generation is not None
+                and running_generation.numel() > 0
+            ):
                 for token_idx in range(log_x_theta.shape[1]):
                     # TODO: Looping over token positions like this does not allow for
                     #   some processors, e.g. length penalty which could be applied all
@@ -373,6 +383,9 @@ class D3PM(Denoiser):
             assert q_xs.isnan().sum().item() == 0, "NaN found in the posterior."
             xs = self._sample_categorical(q_xs, generation_config.do_sample)
         elif generation_config.sampling_strategy == "predict_and_noise":
+            assert self.config.diffusion_type == "absorbing", (
+                "predict_and_noise decoding strategy only supports absorbing diffusion."
+            )
             # assert (
             #     abs((x_theta.sum() / prob_check_denom).item() - 1.0) < 1e-6
             # ), "Denoising output probabilities not summing to 1."
@@ -387,19 +400,26 @@ class D3PM(Denoiser):
             xs = self._sample_categorical(x_theta, generation_config.do_sample)
 
             # Noise
-            # TODO: alpha_s is off here b/c dt is based on num_timesteps
-            num_noise_indices = ((1 - alpha_s) * xs.shape[-1]).to(torch.int)
+            # num_noise_indices = torch.minimum(
+            #     ((1 - alpha_s) * generation_config.block_size).to(torch.int),
+            #     (denoiser_inputs.xt == self.mask_token_id).sum()  # type: ignore
+            # )
+            num_noise_indices = ((1 - alpha_s) * generation_config.block_size).to(
+                torch.int
+            )
             if generation_config.confidence_based_noising:
                 conf = x_theta.gather(-1, xs[..., None]).squeeze(-1)
                 if self.config.shift_logits:
+                    # noinspection LongLine
                     conf = torch.where(  # already decoded tokens have 'inf' confidence
-                        (denoiser_inputs.xt[..., 1:] == self.mask_token_id).bool(),
+                        (denoiser_inputs.xt[..., 1:] == self.mask_token_id).bool(),  # type: ignore noqa: E501
                         conf,
                         torch.inf,
                     )
                 else:
+                    # noinspection LongLine
                     conf = torch.where(  # already decoded tokens have 'inf' confidence
-                        (denoiser_inputs.xt == self.mask_token_id).bool(),
+                        (denoiser_inputs.xt == self.mask_token_id).bool(),  # type: ignore noqa: E501
                         conf,
                         torch.inf,
                     )
@@ -407,7 +427,6 @@ class D3PM(Denoiser):
             else:
                 # TODO: implement this
                 raise NotImplementedError
-            # TODO: this is MDLM-specific
             xs[..., noise_indices] = self.mask_token_id
         else:
             raise NotImplementedError(
@@ -457,17 +476,17 @@ class D3PM(Denoiser):
         max_blocks = max_new_tokens // block_size
 
         # Sample max generation length tensor from prior
+        logit_offset = int(self.config.shift_logits)
         accumulated_samples = self._sample_prior(
             device=device,
             batch_size=batch_size,
-            length=max_blocks * block_size,
+            length=max_blocks * block_size + logit_offset,
         )
         if self.config.shift_logits:
             # 'Donate' last idx from inputs as first idx for the to-be-generated blocks
             accumulated_samples[..., 0] = inputs[..., -1]
             inputs = inputs[..., :-1]
         accumulated_samples = torch.cat([inputs, accumulated_samples], dim=-1)
-        logit_offset = int(self.config.shift_logits)
         if generation_config.use_cache and inputs.numel() > 0:
             past_key_values = self.update_past_key_values(
                 inputs=inputs,
@@ -479,6 +498,10 @@ class D3PM(Denoiser):
             inputs_offset = 0
 
         total_NFEs = 0
+        timesteps = self._sample_generation_timesteps(  # Re-use in every block
+            generation_config, max_length=block_size, device=device
+        )
+        dt = (1 - generation_config.min_t) / len(timesteps)
         block_pbar = tqdm(
             range(max_blocks),
             desc="Blocks",
@@ -493,6 +516,8 @@ class D3PM(Denoiser):
                 + ((block_id + 1) * block_size)
                 + logit_offset,
             ]
+            if self.mask_token_id not in xt:
+                continue
             timesteps = self._sample_generation_timesteps(
                 generation_config, max_length=block_size, device=device
             )
@@ -503,13 +528,19 @@ class D3PM(Denoiser):
                 leave=False,
                 disable=disable_pbar,
             )
-            dt = (1 - generation_config.min_t) / len(timesteps)
             cache = None
             context = (
                 accumulated_samples[:, : (block_id * block_size)]
                 if block_id > 0 and not generation_config.use_cache
                 else None
             )
+            # Used for logit processing
+            running_generation = accumulated_samples[
+                :,
+                inputs.shape[-1] + logit_offset : inputs.shape[-1]
+                + (block_id * block_size)
+                + logit_offset,
+            ]
             for t in step_pbar:
                 if cache is None:
                     block_NFEs += 1
@@ -524,15 +555,6 @@ class D3PM(Denoiser):
                     context=context,
                     past_key_values=past_key_values,
                 )
-
-                # Used for logit processing
-                running_generation = accumulated_samples[
-                    :,
-                    inputs.shape[-1] : inputs.shape[-1]
-                    + (block_id * block_size)
-                    + logit_offset,
-                ]
-
                 xs, cache = self._generate_unconditional(
                     generation_config=generation_config,
                     alpha_t=alpha_t,
@@ -546,6 +568,7 @@ class D3PM(Denoiser):
                     **kwargs,
                 )
                 if self.config.shift_logits:
+                    # (re)'Donate' last idx from previous block
                     xs = torch.cat((xt[:, :1], xs), dim=-1)
                 block_pbar.set_postfix(
                     NFEs=total_NFEs,
@@ -558,7 +581,9 @@ class D3PM(Denoiser):
                 ):
                     cache = None
                 xt = xs
-                if (xt == self.mask_token_id).sum().item() == 0:  # TODO: MDLM specific!
+                if (
+                    xt == self.mask_token_id
+                ).sum().item() == 0 and self.config.diffusion_type == "absorbing":
                     break
             accumulated_samples[
                 :,
@@ -572,7 +597,7 @@ class D3PM(Denoiser):
                 is_done = stopping_criteria(
                     input_ids=accumulated_samples[  # type: ignore
                         :,
-                        inputs_offset : inputs_offset
+                        inputs_offset + logit_offset : inputs_offset
                         + ((block_id + 1) * block_size)
                         + logit_offset,
                     ],
@@ -704,6 +729,7 @@ class BD3LM(MDLM):
         super().__init__(config)
         self._create_static_mask()
 
+    # noinspection PyUnusedLocal
     @staticmethod
     def _block_mask(
         b,
@@ -738,6 +764,7 @@ class BD3LM(MDLM):
         # **3. Combine Masks **
         return block_diagonal | offset_block_causal | block_causal
 
+    # noinspection PyUnusedLocal
     @staticmethod
     def _encoder_block_mask(
         b,
@@ -766,6 +793,7 @@ class BD3LM(MDLM):
 
         return block_q >= block_kv
 
+    # noinspection PyUnusedLocal
     @staticmethod
     def _decoder_block_mask(
         b,
@@ -871,7 +899,7 @@ class BD3LM(MDLM):
                 self.static_attention_mask[None, ...]
                 & attention_mask.repeat(1, 2)[:, None, :]
                 & attention_mask.repeat(1, 2)[..., None]
-            )[:, None]
+            )[:, None, ...]  # Make attention mask 4D
             decoder_attention_mask = preprocess_attention_mask(
                 decoder_attention_mask, dtype=torch.float
             )
@@ -881,9 +909,9 @@ class BD3LM(MDLM):
             )
             # TODO manually pass in position ids
             return DenoiserInput(
-                xt=backbone_input_ids,
+                xt=backbone_input_ids,  # type: ignore
                 x0=input_ids,
-                attention_mask=decoder_attention_mask,
+                attention_mask=decoder_attention_mask,  # type: ignore
                 tokens_mask=attention_mask * (1 - context_mask),
                 t=t,
                 alpha_t=alpha_t,
@@ -898,12 +926,12 @@ class BD3LM(MDLM):
                     self.static_attention_mask[None, ...]
                     & attention_mask.repeat(1, 2)[:, None, :]
                     & attention_mask[..., None]
-                )[:, None]
+                )[:, None, ...]  # Make attention mask 4D
                 encoder_attention_mask = (
                     self.encoder_static_attention_mask[None, ...]
                     & attention_mask[:, None, :]
                     & attention_mask[..., None]
-                )[:, None]
+                )[:, None, ...]  # Make attention mask 4D
                 encoder_attention_mask = preprocess_attention_mask(
                     encoder_attention_mask, dtype=torch.float
                 )
@@ -920,7 +948,7 @@ class BD3LM(MDLM):
                     padding_mask,
                 ]
                 encoder_attention_mask = create_block_mask(
-                    torch.nn.attention.flex_attention.and_masks(*enc_masks),
+                    and_masks(*enc_masks),
                     B=None,
                     H=None,
                     Q_LEN=input_ids.shape[1],
@@ -935,12 +963,14 @@ class BD3LM(MDLM):
                     dec_padding_mask,
                 ]
                 decoder_attention_mask = create_block_mask(
-                    torch.nn.attention.flex_attention.and_masks(*dec_masks),
+                    and_masks(*dec_masks),
                     B=None,
                     H=None,
                     Q_LEN=input_ids.shape[1],
                     KV_LEN=input_ids.shape[1] * 2,
                 )
+            else:
+                raise ValueError("Unknown backbone backend")
             return DenoiserInput(
                 xt=xt,
                 x0=input_ids,
@@ -995,11 +1025,14 @@ class BD3LM(MDLM):
             else:  # Caching new tokens in the enc
                 full_seq_length = cache_len + context.shape[-1]
                 encoder_attention_mask = self.encoder_static_attention_mask[
-                    None, cache_len:full_seq_length, :full_seq_length
-                ]
+                    None, None, cache_len:full_seq_length, :full_seq_length
+                ]  # Make attention mask 4D
                 encoder_position_ids = torch.arange(cache_len, full_seq_length).to(
                     device
                 )[None, :]
+                encoder_attention_mask = preprocess_attention_mask(
+                    encoder_attention_mask, dtype=torch.float
+                )
         else:  # Caching context for the first time / not using kv-cache at all
             if context is not None:
                 context_len = context.shape[1]
@@ -1010,15 +1043,24 @@ class BD3LM(MDLM):
             else:
                 full_seq_length = context_len
             encoder_attention_mask = self.encoder_static_attention_mask[
-                None, :context_len, :context_len
-            ]
+                None, None, :context_len, :context_len
+            ]  # Make attention mask 4D
+            encoder_attention_mask = preprocess_attention_mask(
+                encoder_attention_mask, dtype=torch.float
+            )
             position_ids = torch.arange(context_len, full_seq_length).to(device)[
                 None, :
             ]
         if input_ids is not None:
             decoder_attention_mask = torch.ones(
-                (batch_size, input_ids.shape[1], full_seq_length),
+                (batch_size, 1, input_ids.shape[1], full_seq_length),
                 device=device,
+            )  # Make attention mask 4D
+            # Token from last block can't attend to the new block
+            if self.config.shift_logits:
+                decoder_attention_mask[:, 0, -self.config.block_size :] = 0.0
+            decoder_attention_mask = preprocess_attention_mask(
+                decoder_attention_mask, dtype=torch.float
             )
         else:
             decoder_attention_mask = None

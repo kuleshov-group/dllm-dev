@@ -52,7 +52,8 @@ class CustomQwen3Attention(Qwen3Attention):
         )
 
         if past_key_value is not None:
-            # sin and cos are specific to RoPE models; cache_position needed for the static cache
+            # sin and cos are specific to RoPE models
+            # cache_position needed for the static cache
             cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
             key_states, value_states = past_key_value.update(
                 key_states, value_states, self.layer_idx, cache_kwargs
@@ -70,8 +71,11 @@ class CustomQwen3Attention(Qwen3Attention):
                 "output_attentions", False
             ):
                 logger.warning_once(
-                    "`torch.nn.functional.scaled_dot_product_attention` does not support `output_attentions=True`. Falling back to "
-                    'eager attention. This warning can be removed using the argument `attn_implementation="eager"` when loading the model.'
+                    "`torch.nn.functional.scaled_dot_product_attention`"
+                    "does not support `output_attentions=True`."
+                    " Falling back to eager attention."
+                    "This warning can be removed using the argument "
+                    '`attn_implementation="eager"` when loading the model.'
                 )
             else:
                 attention_interface = ALL_ATTENTION_FUNCTIONS[
@@ -102,13 +106,6 @@ class CustomQwen3DecoderLayer(Qwen3DecoderLayer):
 
 
 class CustomQwen3Model(Qwen3Model):
-    """
-    Transformer decoder consisting of *config.num_hidden_layers* layers. Each layer is a [`Qwen3DecoderLayer`]
-
-    Args:
-        config: Qwen3Config
-    """
-
     def __init__(self, config: Qwen3Config):
         super().__init__(config)
         self.layers = nn.ModuleList(
