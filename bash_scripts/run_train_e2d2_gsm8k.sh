@@ -16,13 +16,13 @@ WARMUP_DURATION="1000ba" # 0.1, 0.3, 0.5
 BATCH_SIZE=96 # 96, 128, 256
 MAX_DURATION="20000ba" # 20000ba, 10000ba, 5000ba
 
-PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-1.7B-Base # Qwen/Qwen3-0.6B-Base, Qwen/Qwen3-1.7B-Base, microsoft/Phi-4-mini-reasoning
+PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-0.6B-Base # Qwen/Qwen3-0.6B-Base, Qwen/Qwen3-1.7B-Base, microsoft/Phi-4-mini-reasoning
 
-TAG=e2d2_qwen2B
+TAG=e2d2_noshift_ema999_qwen600m_v2
 RUN_NAME=gsm8k-block${BLOCK_SIZE}-keepbottomenc${KEEP_BOTTOM_N_ENCODER_LAYERS}-keeptopdec${KEEP_TOP_N_DECODER_LAYERS}-${TAG}
 
-MICRO_BATCH_SIZE=4
-NUM_WORKERS=64
+MICRO_BATCH_SIZE=1
+NUM_WORKERS=32
 
 composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoiser.py \
   run_name=${RUN_NAME} \
@@ -30,7 +30,7 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   dataset@train_dataset=gsm8k_train \
   dataset@eval_dataset=gsm8k_eval \
   composer.optimizer.lr=${LR} \
-  composer.trainer.eval_interval="5ep" \
+  composer.trainer.eval_interval="1ep" \
   composer.trainer.max_duration=${MAX_DURATION} \
   composer.trainer.save_num_checkpoints_to_keep=1 \
   composer/lr_scheduler=cosine_annealing_with_warmup \
@@ -38,6 +38,7 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   model=bd3lm \
   model/backbone@model.config.backbone_config=llm_as_encoder_decoder \
   model.config.length=768 \
+  model.config.shift_logits=false \
   model.config.backbone_config.keep_bottom_n_encoder_layers=${KEEP_BOTTOM_N_ENCODER_LAYERS} \
   model.config.backbone_config.keep_top_n_decoder_layers=${KEEP_TOP_N_DECODER_LAYERS} \
   model.config.backbone_config.tie_encoder_decoder_weights=true \
@@ -49,9 +50,9 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   block_size=${BLOCK_SIZE} \
   training.antithetic_sampling=false \
   hydra.run.dir=${RUN_DIR}/${RUN_NAME} \
-  composer.trainer.save_interval="5ep" \
+  composer.trainer.save_interval="1ep" \
   composer.loggers.name=${RUN_NAME} \
   train_dataloader.num_workers=${NUM_WORKERS} \
-  composer.callbacks.hf_compatible_checkpointing.save_local=false \
-  composer.callbacks.hf_compatible_checkpointing.save_to_hub=true \
-  composer.callbacks.hf_compatible_checkpointing.hub_repo_id=kuleshov-group/${RUN_NAME}
+  composer.callbacks.hf_compatible_checkpointing.save_local=true \
+  composer.callbacks.hf_compatible_checkpointing.save_to_hub=false \
+  training.ema=0.9

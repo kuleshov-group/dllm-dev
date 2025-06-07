@@ -18,7 +18,7 @@ MAX_DURATION="20000ba" # 20000ba, 10000ba, 5000ba
 
 PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-0.6B-Base # Qwen/Qwen3-0.6B-Base, Qwen/Qwen3-1.7B-Base, microsoft/Phi-4-mini-reasoning
 
-TAG=e2d2_ao_noshift_qwen600M_v3
+TAG=e2d2_ao_noshift_noema_qwen600M_v4
 RUN_NAME=gsm8k-block${BLOCK_SIZE}-keepbottomenc${KEEP_BOTTOM_N_ENCODER_LAYERS}-keeptopdec${KEEP_TOP_N_DECODER_LAYERS}-${TAG}
 
 MICRO_BATCH_SIZE=1
@@ -38,7 +38,7 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   model=ao_bd3lm \
   model/backbone@model.config.backbone_config=llm_as_encoder_decoder_aoarm \
   model.config.length=768 \
-  model.config.shift_logits=false \
+  model.config.shift_logits=true \
   model.config.backbone_config.keep_bottom_n_encoder_layers=${KEEP_BOTTOM_N_ENCODER_LAYERS} \
   model.config.backbone_config.keep_top_n_decoder_layers=${KEEP_TOP_N_DECODER_LAYERS} \
   model.config.backbone_config.tie_encoder_decoder_weights=true \
@@ -53,6 +53,5 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   composer.trainer.save_interval="5ep" \
   composer.loggers.name=${RUN_NAME} \
   train_dataloader.num_workers=${NUM_WORKERS} \
-  composer.callbacks.hf_compatible_checkpointing.save_local=false \
-  composer.callbacks.hf_compatible_checkpointing.save_to_hub=true \
-  composer.callbacks.hf_compatible_checkpointing.hub_repo_id=yairschiff/${RUN_NAME}
+  composer.callbacks.hf_compatible_checkpointing.save_local=true \
+  composer.callbacks.hf_compatible_checkpointing.save_to_hub=false
