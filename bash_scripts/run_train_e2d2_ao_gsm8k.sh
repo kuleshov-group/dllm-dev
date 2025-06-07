@@ -8,7 +8,7 @@ source setup_env.sh
 BLOCK_SIZE=4
 USE_ENCODER_CAUSAL_MASK=false # true, false
 KEEP_BOTTOM_N_ENCODER_LAYERS=-1
-KEEP_TOP_N_DECODER_LAYERS=14
+KEEP_TOP_N_DECODER_LAYERS=7
 
 # Hyperparameters
 LR=1e-5 # 1e-5, 1e-4, 1e-3
@@ -18,7 +18,7 @@ MAX_DURATION="20000ba" # 20000ba, 10000ba, 5000ba
 
 PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-0.6B-Base # Qwen/Qwen3-0.6B-Base, Qwen/Qwen3-1.7B-Base, microsoft/Phi-4-mini-reasoning
 
-TAG=e2d2_ao_noshift_qwen600M_v2
+TAG=e2d2_ao_noshift_qwen600M_v3
 RUN_NAME=gsm8k-block${BLOCK_SIZE}-keepbottomenc${KEEP_BOTTOM_N_ENCODER_LAYERS}-keeptopdec${KEEP_TOP_N_DECODER_LAYERS}-${TAG}
 
 MICRO_BATCH_SIZE=1
@@ -36,7 +36,7 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   composer/lr_scheduler=cosine_annealing_with_warmup \
   composer.lr_scheduler.t_warmup=${WARMUP_DURATION} \
   model=ao_bd3lm \
-  model/backbone@model.config.backbone_config=llm_as_encoder_decoder \
+  model/backbone@model.config.backbone_config=llm_as_encoder_decoder_aoarm \
   model.config.length=768 \
   model.config.shift_logits=false \
   model.config.backbone_config.keep_bottom_n_encoder_layers=${KEEP_BOTTOM_N_ENCODER_LAYERS} \

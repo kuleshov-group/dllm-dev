@@ -1104,37 +1104,66 @@ class AnyOrderBD3LM(BD3LM):
             self.encoder_static_attention_mask = None
         self._create_static_mask()
 
+    # noinspection PyUnusedLocal
+    @staticmethod
+    def _decoder_block_mask(
+        b,
+        h,
+        q_idx,
+        kv_idx,
+        block_size: int | None = None,
+        seq_length: int | None = None,
+        mask_decoder: bool = False,
+    ) -> torch.Tensor:
+        del b, h
+
+        # Indicate whether token belongs to context, clean block, or masked block:
+        x0_context_flag = (kv_idx < seq_length).bool()
+        x0_block_flag_kv = (kv_idx >= seq_length).bool() & (kv_idx < seq_length * 2)
+
+        # Compute block indices
+        block_q = q_idx // block_size
+        block_kv = (kv_idx % seq_length) // block_size
+
+        # **1. Offset Block-Causal Mask (M_OBC) **
+        offset_block_causal = (block_q > block_kv) & x0_context_flag
+
+        # **2. Truncated Block Diagonal Mask (Trunc M_BD) **
+        block_diagonal = (
+            (block_q == block_kv) & ((kv_idx % seq_length) < q_idx) & x0_block_flag_kv
+        )
+
+        return offset_block_causal | block_diagonal
+
     def _create_static_mask(self) -> None:
         if self.config.backbone_is_decoder_only:
-            # causal static mask
-            static_mask = torch.tril(
-                torch.ones(
-                    (self.config.length, self.config.length),
-                    dtype=torch.bool,
-                )
-            ).unsqueeze(0)
-            if self.config.attn_backend == "flex_attention":
-                self.static_attention_mask = static_mask
-            else:
-                self.register_buffer(
-                    "static_attention_mask",
-                    static_mask,
-                )
+            raise not NotImplementedError(
+                "AnyOrderBD3LM does not support decoder-only backbone."
+            )
         else:
-            encoder_static_mask = torch.tril(
-                torch.ones(
-                    (self.config.length, self.config.length),
-                    dtype=torch.bool,
-                )
+            encoder_static_mask = self._encoder_block_mask(
+                b=None,
+                h=None,
+                q_idx=torch.arange(self.config.length)[:, None],
+                kv_idx=torch.arange(self.config.length)[None, :],
+                block_size=self.config.block_size,
             )
-            decoder_static_mask = torch.diag(
-                torch.ones(
-                    self.config.length,
-                    dtype=torch.bool,
-                )
+            decoder_context_mask = self._decoder_block_mask(
+                b=None,
+                h=None,
+                q_idx=torch.arange(self.config.length)[:, None],
+                kv_idx=torch.arange(self.config.length * 2)[None, :],
+                block_size=self.config.block_size,
+                seq_length=self.config.length,
             )
-            decoder_static_mask = torch.cat(
-                (encoder_static_mask ^ decoder_static_mask, decoder_static_mask), dim=-1
+            decoder_mask_static_mask = self._decoder_block_mask(
+                b=None,
+                h=None,
+                q_idx=torch.arange(self.config.length)[:, None],
+                kv_idx=torch.arange(self.config.length * 3)[None, :],
+                block_size=self.config.block_size,
+                seq_length=self.config.length,
+                mask_decoder=True,  # Decoder attn for masks
             )
             self.register_buffer(
                 "encoder_static_attention_mask",
@@ -1142,7 +1171,11 @@ class AnyOrderBD3LM(BD3LM):
             )
             self.register_buffer(
                 "static_attention_mask",
-                decoder_static_mask,
+                decoder_mask_static_mask,
+            )
+            self.register_buffer(
+                "static_attention_mask_context",
+                decoder_context_mask,
             )
 
     def _compute_loss(
@@ -1203,11 +1236,13 @@ class AnyOrderBD3LM(BD3LM):
         xt = input_ids.clone()
 
         if permute_flag.any():
-            batch, context_len = input_ids.shape
+            batch_size, context_len = input_ids.shape
             n_blocks = context_len // self.block_size
 
-            to_permute = permute_flag.view(batch, n_blocks, self.block_size)
-            rand = torch.rand(batch, n_blocks, self.block_size, device=input_ids.device)
+            to_permute = permute_flag.view(batch_size, n_blocks, self.block_size)
+            rand = torch.rand(
+                batch_size, n_blocks, self.block_size, device=input_ids.device
+            )
             rand = torch.where(to_permute, rand, float("inf"))
             # sort is stable on cpu
             perm_indices = torch.argsort(rand.cpu(), dim=-1, descending=True).to(
@@ -1218,28 +1253,20 @@ class AnyOrderBD3LM(BD3LM):
                 * self.block_size
             )
             perm_indices = block_offset + perm_indices
-            perm_indices = perm_indices.view(batch, n_blocks * self.block_size)
+            perm_indices = perm_indices.view(batch_size, n_blocks * self.block_size)
 
         if self.config.backbone_is_decoder_only:
-            decoder_attention_mask = (
-                self.static_attention_mask[None, ...]
-                & attention_mask[:, None, :]
-                & attention_mask[..., None]
-            )
-            if permute_flag.any():
-                decoder_attention_mask = decoder_attention_mask[:, :, perm_indices]
-            return DenoiserInput(
-                xt=xt,
-                x0=input_ids,
-                attention_mask=decoder_attention_mask,
-                tokens_mask=attention_mask * (1 - context_mask),
-                t=t,
-                alpha_t=alpha_t,
-                alpha_t_prime=alpha_t_prime,
+            raise NotImplementedError(
+                "AnyOrderBD3LM does not support decoder-only backbone."
             )
         else:
             decoder_attention_mask = (
                 self.static_attention_mask[None, ...]
+                & attention_mask.repeat(1, 3)[:, None, :]
+                & attention_mask[..., None]
+            )[:, None]
+            decoder_attention_mask_context = (
+                self.static_attention_mask_context[None, ...]
                 & attention_mask.repeat(1, 2)[:, None, :]
                 & attention_mask[..., None]
             )[:, None]
@@ -1250,31 +1277,32 @@ class AnyOrderBD3LM(BD3LM):
             )[:, None]
             if permute_flag.any():
                 seq_len = input_ids.shape[1]
-                batch_indices = torch.arange(batch, device=input_ids.device)[:, None]
-                seq_indices = torch.arange(seq_len, device=input_ids.device)[
-                    None, :
-                ].repeat(batch, 1)
-                perm_indices_dec = torch.cat(
-                    (perm_indices, seq_indices + seq_len), dim=-1
+                seq_indices = torch.arange(seq_len, device=input_ids.device)
+                decoder_attention_mask = torch.gather(
+                    decoder_attention_mask,
+                    dim=-2,
+                    index=perm_indices[:, None, :, None].expand(
+                        batch_size, 1, seq_len, decoder_attention_mask.shape[-1]
+                    ),
                 )
-                decoder_attention_mask = decoder_attention_mask.transpose(1, 3)
-                decoder_attention_mask = decoder_attention_mask[
-                    batch_indices, perm_indices_dec
-                ]
-                decoder_attention_mask = decoder_attention_mask.transpose(
-                    1, 3
-                ).contiguous()
+                # masks should still self-attend
+                decoder_attention_mask[:, :, -seq_indices, -seq_indices] = 1
 
-                encoder_attention_mask = encoder_attention_mask.transpose(1, 3)
-                encoder_attention_mask = encoder_attention_mask[
-                    batch_indices, perm_indices
-                ]
-                encoder_attention_mask = encoder_attention_mask.transpose(
-                    1, 3
-                ).contiguous()
+                decoder_attention_mask_context = torch.gather(
+                    decoder_attention_mask_context,
+                    dim=-2,
+                    index=perm_indices[:, None, :, None].expand(
+                        batch_size, 1, seq_len, decoder_attention_mask_context.shape[-1]
+                    ),
+                )
+                # tokens should still self-attend
+                decoder_attention_mask_context[:, :, -seq_indices, -seq_indices] = 1
 
             decoder_attention_mask = preprocess_attention_mask(
                 decoder_attention_mask, dtype=torch.float
+            )
+            decoder_attention_mask_context = preprocess_attention_mask(
+                decoder_attention_mask_context, dtype=torch.float
             )
             encoder_attention_mask = preprocess_attention_mask(
                 encoder_attention_mask, dtype=torch.float
@@ -1293,6 +1321,7 @@ class AnyOrderBD3LM(BD3LM):
                 backbone_kwargs={
                     "encoder_input_ids": input_ids,
                     "encoder_attention_mask": encoder_attention_mask,
+                    "attention_mask_context": decoder_attention_mask_context,
                 },
             )
 
