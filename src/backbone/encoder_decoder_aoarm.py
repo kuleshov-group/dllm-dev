@@ -142,6 +142,8 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
         | BlockMask
         | None = None,  # for Decoder
         encoder_input_ids: torch.LongTensor | None = None,  # for Encoder
+        input_ids_context: torch.LongTensor | None = None,  # for Decoder
+        position_ids_context: torch.LongTensor | None = None,  # for Decoder
         encoder_attention_mask: torch.FloatTensor | BlockMask | None = None,
         past_key_values: DynamicCache | None = None,
         position_ids: torch.LongTensor | None = None,
@@ -171,9 +173,51 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
             if return_past_key_values:
                 return past_key_values
 
+        # Encode block context
+        if input_ids_context is not None:
+            decoder_hidden_states_context = self.encoder.model.embed_tokens(
+                input_ids_context
+            )
+            if position_ids_context is None:
+                position_ids_context = torch.arange(
+                    input_ids_context.shape[-1], device=input_ids_context.device
+                ).unsqueeze(0)
+            # noinspection PyProtectedMember
+            attention_mask_block_context = self.decoder.model._update_causal_mask(
+                attention_mask=attention_mask_block_context,
+                input_tensor=decoder_hidden_states_context,
+                cache_position=position_ids_context[0],
+                past_key_values=past_key_values,
+                output_attentions=False,
+            )
+            position_embeddings_context = self.decoder.model.rotary_emb(
+                decoder_hidden_states_context, position_ids_context
+            )
+
+            for decoder_layer in self.decoder.model.layers:
+                layer_idx = decoder_layer.self_attn.layer_idx
+                if layer_idx not in self.decoder_layers_to_keep:
+                    continue
+
+                # TODO maybe adopt gradient checkpointing from transformers
+
+                # Cross-attend to encoder kvs
+                _ = decoder_layer(
+                    hidden_states=decoder_hidden_states_context,
+                    attention_mask=attention_mask_block_context,
+                    position_ids=position_ids_context,
+                    past_key_value=past_key_values,
+                    output_attentions=False,
+                    use_cache=True,
+                    cache_position=position_ids_context[0],
+                    position_embeddings=position_embeddings_context,
+                    **flash_attn_kwargs,
+                )
+            if return_past_key_values:
+                return past_key_values
+
         # Run decoder with xattn to clean tokens
         decoder_hidden_states = self.encoder.model.embed_tokens(input_ids)
-
         if position_ids is None:
             position_ids = torch.arange(
                 input_ids.shape[1], device=input_ids.device
@@ -181,6 +225,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
         decoder_position_embeddings = self.decoder.model.rotary_emb(
             decoder_hidden_states, position_ids
         )
+
         # noinspection PyProtectedMember
         attention_mask = self.decoder.model._update_causal_mask(
             attention_mask=attention_mask,
@@ -189,34 +234,6 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
             past_key_values=past_key_values,
             output_attentions=False,
         )
-        attention_mask_block_context = self.decoder.model._update_causal_mask(
-            attention_mask=attention_mask_block_context,
-            input_tensor=decoder_hidden_states,
-            cache_position=position_ids[0],
-            past_key_values=past_key_values,
-            output_attentions=False,
-        )
-
-        # Encode block context
-        for decoder_layer in self.decoder.model.layers:
-            layer_idx = decoder_layer.self_attn.layer_idx
-            if layer_idx not in self.decoder_layers_to_keep:
-                continue
-
-            # TODO maybe adopt gradient checkpointing from transformers
-
-            # Cross-attend to encoder kvs
-            _ = decoder_layer(
-                hidden_states=decoder_hidden_states,
-                attention_mask=attention_mask_block_context,
-                position_ids=position_ids,
-                past_key_value=past_key_values,
-                output_attentions=False,
-                use_cache=True,
-                cache_position=position_ids[0],
-                position_embeddings=decoder_position_embeddings,
-                **flash_attn_kwargs,
-            )
 
         # Decode masks
         for decoder_layer in self.decoder.model.layers:
