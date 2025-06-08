@@ -1285,8 +1285,8 @@ class AnyOrderBD3LM(BD3LM):
                         batch_size, 1, seq_len, decoder_attention_mask.shape[-1]
                     ),
                 )
-                # masks should still self-attend
-                decoder_attention_mask[:, :, -seq_indices, -seq_indices] = 1
+                # no need for masks to self-attend
+                decoder_attention_mask[:, :, -seq_indices, -seq_indices] = 0
 
                 decoder_attention_mask_context = torch.gather(
                     decoder_attention_mask_context,
