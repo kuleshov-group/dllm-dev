@@ -1285,13 +1285,32 @@ class AnyOrderBD3LM(BD3LM):
                         batch_size, 1, seq_len, decoder_attention_mask.shape[-1]
                     ),
                 )
+                perm_indices_cols = perm_indices.repeat(1, 3)
+                perm_indices_cols[:, seq_len:] += seq_len  # shift indices for context
+                decoder_attention_mask = torch.gather(
+                    decoder_attention_mask,
+                    dim=-1,
+                    index=perm_indices_cols[:, None, None, :].expand(
+                        batch_size, 1, seq_len, decoder_attention_mask.shape[-1]
+                    ),
+                )
+
                 # no need for masks to self-attend
-                decoder_attention_mask[:, :, -seq_indices, -seq_indices] = 0
+                decoder_attention_mask[:, :, :, seq_len * 2 :] = 0.0
 
                 decoder_attention_mask_context = torch.gather(
                     decoder_attention_mask_context,
                     dim=-2,
                     index=perm_indices[:, None, :, None].expand(
+                        batch_size, 1, seq_len, decoder_attention_mask_context.shape[-1]
+                    ),
+                )
+                perm_indices_cols = perm_indices.repeat(1, 2)
+                perm_indices_cols[:, seq_len:] += seq_len  # shift indices for context
+                decoder_attention_mask_context = torch.gather(
+                    decoder_attention_mask_context,
+                    dim=-1,
+                    index=perm_indices_cols[:, None, None, :].expand(
                         batch_size, 1, seq_len, decoder_attention_mask_context.shape[-1]
                     ),
                 )
