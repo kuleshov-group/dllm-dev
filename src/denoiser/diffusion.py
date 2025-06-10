@@ -1352,17 +1352,21 @@ class AnyOrderBD3LM(BD3LM):
                 else context.shape[0]
             )
         )
+        decoder_attention_mask_context = None
+        device = (
+            input_ids.device
+            if input_ids is not None
+            else (
+                new_context_ids.device
+                if new_context_ids is not None
+                else context.device
+            )
+        )
         seq_len = (
             input_ids.shape[1]
             if input_ids is not None
             else (new_context_ids.shape[1] if new_context_ids is not None else None)
         )
-        decoder_attention_mask_context = None
-        device = input_ids.device if input_ids is not None else new_context_ids.device
-        # Encoder-decoder inputs
-        if return_past_key_values:  # Indicates this is a cache update step
-            context = input_ids
-            input_ids = None
         if past_key_values is not None:
             cache_len = self._get_past_key_values_seq_length(past_key_values)
             context_len = cache_len
@@ -1460,9 +1464,9 @@ class AnyOrderBD3LM(BD3LM):
             DynamicCache: Cached key-value pairs.
         """
         context_input = self._prepare_inputs_inference(
-            input_ids=inputs,
+            context=inputs,
             past_key_values=past_key_values,
-            position_ids=encoder_position_ids,
+            encoder_position_ids=encoder_position_ids,
             return_past_key_values=True,
         )
         past_key_values = self._backbone_forward(
@@ -1550,6 +1554,7 @@ class AnyOrderBD3LM(BD3LM):
         all_position_ids = torch.arange(
             inputs.shape[-1] + max_blocks * block_size, device=device
         )[None, :]
+        past_key_values = None
 
         # Sample max generation length tensor from prior
         accumulated_samples = self._sample_prior(
@@ -1566,7 +1571,7 @@ class AnyOrderBD3LM(BD3LM):
         if generation_config.use_cache and inputs.numel() > 0:
             past_key_values = self.update_past_key_values(
                 inputs=inputs,
-                past_key_values=DynamicCache(),
+                past_key_values=past_key_values,
             )
             inputs_offset = inputs.shape[-1]
         else:
