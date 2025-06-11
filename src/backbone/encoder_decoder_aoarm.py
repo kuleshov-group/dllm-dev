@@ -202,7 +202,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                 # TODO maybe adopt gradient checkpointing from transformers
 
                 # Cross-attend to encoder kvs
-                _ = decoder_layer(
+                decoder_hidden_states_context = decoder_layer(
                     hidden_states=decoder_hidden_states_context,
                     attention_mask=attention_mask_block_context,
                     position_ids=position_ids_context,
@@ -212,7 +212,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                     cache_position=position_ids_context[0],
                     position_embeddings=position_embeddings_context,
                     **flash_attn_kwargs,
-                )
+                )[0]
             if return_past_key_values:
                 return past_key_values
 
