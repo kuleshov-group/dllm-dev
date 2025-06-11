@@ -1339,7 +1339,7 @@ class AnyOrderBD3LM(BD3LM):
                 backbone_kwargs={
                     "encoder_input_ids": input_ids,
                     "encoder_attention_mask": encoder_attention_mask,
-                    "attention_mask_context": decoder_attention_mask_context,
+                    "attention_mask_block_context": decoder_attention_mask_context,
                     "input_ids_context": input_ids,
                 },
             )
