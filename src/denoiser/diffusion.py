@@ -1200,7 +1200,7 @@ class AnyOrderBD3LM(BD3LM):
         count = denoiser_inputs.tokens_mask.sum()
         batch_nll = nlls.sum()
         token_nll = batch_nll / count
-        return LossAndNllOutput(loss=token_nll, nlls=nlls)
+        return LossAndNllOutput(loss=token_nll, nlls=nlls)  # type: ignore
 
     def _prepare_inputs(
         self,
@@ -1235,8 +1235,8 @@ class AnyOrderBD3LM(BD3LM):
         perm_indices = None
         xt = input_ids.clone()
 
+        batch_size, context_len = input_ids.shape
         if permute_flag.any():
-            batch_size, context_len = input_ids.shape
             n_blocks = context_len // self.block_size
 
             to_permute = permute_flag.view(batch_size, n_blocks, self.block_size)
@@ -1264,75 +1264,74 @@ class AnyOrderBD3LM(BD3LM):
                 self.static_attention_mask[None, ...]
                 & attention_mask.repeat(1, 3)[:, None, :]
                 & attention_mask[..., None]
-            )[:, None]
+            )
             decoder_attention_mask_context = (
                 self.static_attention_mask_context[None, ...]
                 & attention_mask.repeat(1, 2)[:, None, :]
                 & attention_mask[..., None]
-            )[:, None]
+            )
             encoder_attention_mask = (
                 self.encoder_static_attention_mask[None, ...]
                 & attention_mask[:, None, :]
                 & attention_mask[..., None]
-            )[:, None]
+            )
             if permute_flag.any():
                 seq_len = input_ids.shape[1]
                 seq_indices = torch.arange(seq_len, device=input_ids.device)
                 decoder_attention_mask = torch.gather(
                     decoder_attention_mask,
                     dim=-2,
-                    index=perm_indices[:, None, :, None].expand(
-                        batch_size, 1, seq_len, decoder_attention_mask.shape[-1]
+                    index=torch.argsort(perm_indices, dim=-1)[..., None].expand(
+                        batch_size, seq_len, decoder_attention_mask.shape[-1]
                     ),
                 )
                 perm_indices_cols = perm_indices.repeat(1, 3)
                 perm_indices_cols[:, seq_len:] += seq_len  # shift indices for context
+                perm_indices_cols[:, seq_len * 2 :] += (
+                    seq_len  # shift indices for context
+                )
                 decoder_attention_mask = torch.gather(
                     decoder_attention_mask,
                     dim=-1,
-                    index=perm_indices_cols[:, None, None, :].expand(
-                        batch_size, 1, seq_len, decoder_attention_mask.shape[-1]
+                    index=torch.argsort(perm_indices_cols, dim=-1)[:, None, :].expand(
+                        batch_size, seq_len, decoder_attention_mask.shape[-1]
                     ),
                 )
-
-                # no need for masks to self-attend
-                decoder_attention_mask[:, :, :, seq_len * 2 :] = 0.0
 
                 decoder_attention_mask_context = torch.gather(
                     decoder_attention_mask_context,
                     dim=-2,
-                    index=perm_indices[:, None, :, None].expand(
-                        batch_size, 1, seq_len, decoder_attention_mask_context.shape[-1]
+                    index=torch.argsort(perm_indices, dim=-1)[..., None].expand(
+                        batch_size, seq_len, decoder_attention_mask_context.shape[-1]
                     ),
                 )
-                perm_indices_cols = perm_indices.repeat(1, 2)
-                perm_indices_cols[:, seq_len:] += seq_len  # shift indices for context
+                perm_indices_cols = perm_indices_cols[..., : seq_len * 2]
                 decoder_attention_mask_context = torch.gather(
                     decoder_attention_mask_context,
                     dim=-1,
-                    index=perm_indices_cols[:, None, None, :].expand(
-                        batch_size, 1, seq_len, decoder_attention_mask_context.shape[-1]
+                    index=torch.argsort(perm_indices_cols, dim=-1)[:, None, :].expand(
+                        batch_size, seq_len, decoder_attention_mask_context.shape[-1]
                     ),
                 )
-                # tokens should still self-attend
-                decoder_attention_mask_context[:, :, -seq_indices, -seq_indices] = 1.0
+                # inner-encoder tokens should self-attend
+                decoder_attention_mask_context[:, -seq_indices, -seq_indices] = 1
 
             decoder_attention_mask = preprocess_attention_mask(
-                decoder_attention_mask, dtype=torch.float
+                decoder_attention_mask[:, None], dtype=torch.float
             )
             decoder_attention_mask_context = preprocess_attention_mask(
-                decoder_attention_mask_context, dtype=torch.float
+                decoder_attention_mask_context[:, None], dtype=torch.float
             )
             encoder_attention_mask = preprocess_attention_mask(
-                encoder_attention_mask, dtype=torch.float
+                encoder_attention_mask[:, None], dtype=torch.float
             )
             xt = torch.where(
                 (attention_mask == 1) & (context_mask == 0), self.mask_token_id, xt
             )
             return DenoiserInput(
-                xt=xt,
+                xt=xt,  # type: ignore
                 x0=input_ids,
-                attention_mask=decoder_attention_mask,
+                attention_mask=decoder_attention_mask,  # type: ignore
                 tokens_mask=attention_mask * (1 - context_mask),
                 t=t,
                 alpha_t=alpha_t,
