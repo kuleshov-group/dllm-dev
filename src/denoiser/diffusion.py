@@ -685,10 +685,6 @@ class MDLM(D3PM):
         loss = (
             log_p_theta * denoiser_inputs.alpha_t_prime / (1 - denoiser_inputs.alpha_t)
         )
-        if not self.training:
-            denoiser_inputs.tokens_mask = denoiser_inputs.tokens_mask * (
-                denoiser_inputs.x0 != self.pad_token_id
-            )
         nlls = loss * denoiser_inputs.tokens_mask
         count = denoiser_inputs.tokens_mask.sum()
         batch_nll = nlls.sum()
@@ -995,8 +991,8 @@ class BD3LM(MDLM):
         return_past_key_values: bool = False,
         **backbone_kwargs: Any,
     ) -> DenoiserInput:
-        device = input_ids.device
-        batch_size = input_ids.shape[0]
+        device = input_ids.device if input_ids is not None else context.device
+        batch_size = input_ids.shape[0] if input_ids is not None else context.shape[0]
         if self.config.backbone_is_decoder_only:
             return super()._prepare_inputs_inference(
                 input_ids=input_ids,
@@ -1016,10 +1012,10 @@ class BD3LM(MDLM):
         position_ids, encoder_position_ids = None, None
         if past_key_values is not None:
             cache_len = self._get_past_key_values_seq_length(past_key_values)
-            if input_ids is not None:  # Skip enc: nothing new for enc to cache
-                full_seq_length = cache_len + input_ids.shape[1]
+            if input_ids is not None:  # Skip enc: nothing new to cache
+                full_seq_length = cache_len + input_ids.shape[-1]
                 encoder_attention_mask = None
-                position_ids = torch.arange(cache_len, full_seq_length).to(device)[
+                position_ids = torch.arange(cache_len, full_seq_length, device=device)[
                     None, :
                 ]
             else:  # Caching new tokens in the enc
@@ -1033,21 +1029,23 @@ class BD3LM(MDLM):
                 encoder_attention_mask = preprocess_attention_mask(
                     encoder_attention_mask, dtype=torch.float
                 )
-        else:  # Caching context for the first time / not using kv-cache at all
+        else:  # Not using kv-cache
             if context is not None:
                 context_len = context.shape[1]
+                encoder_attention_mask = self.encoder_static_attention_mask[
+                    None, None, :context_len, :context_len
+                ]  # Make attention mask 4D
+                encoder_attention_mask = preprocess_attention_mask(
+                    encoder_attention_mask, dtype=torch.float
+                )
+                encoder_position_ids = torch.arange(context_len).to(device)[None, :]
             else:
                 context_len = 0
+                encoder_attention_mask = None
             if input_ids is not None:
                 full_seq_length = context_len + input_ids.shape[1]
             else:
                 full_seq_length = context_len
-            encoder_attention_mask = self.encoder_static_attention_mask[
-                None, None, :context_len, :context_len
-            ]  # Make attention mask 4D
-            encoder_attention_mask = preprocess_attention_mask(
-                encoder_attention_mask, dtype=torch.float
-            )
             position_ids = torch.arange(context_len, full_seq_length).to(device)[
                 None, :
             ]
@@ -1128,11 +1126,22 @@ class AnyOrderBD3LM(BD3LM):
         # **1. Offset Block-Causal Mask (M_OBC) **
         offset_block_causal = (block_q > block_kv) & x0_context_flag
 
-        # **2. Truncated Block Diagonal Mask (Trunc M_BD) **
-        block_diagonal = (
-            (block_q == block_kv) & ((kv_idx % seq_length) < q_idx) & x0_block_flag_kv
-        )
+        if mask_decoder:  # Decoder
+            # **2. Truncated Block Diagonal Mask (Trunc M_BD) w/o diagonal **
+            block_diagonal = (
+                (block_q == block_kv)
+                & ((kv_idx % seq_length) < q_idx)
+                & x0_block_flag_kv
+            )
+            mask_flag_kv = (kv_idx >= seq_length * 2).bool()
+            diagonal = (q_idx == kv_idx % seq_length) & mask_flag_kv
+            return offset_block_causal | block_diagonal | diagonal
 
+        # (Inner Encoder)
+        # **2. Truncated Block Diagonal Mask (Trunc M_BD) w/diagonal **
+        block_diagonal = (
+            (block_q == block_kv) & ((kv_idx % seq_length) <= q_idx) & x0_block_flag_kv
+        )
         return offset_block_causal | block_diagonal
 
     def _create_static_mask(self) -> None:
@@ -1155,6 +1164,7 @@ class AnyOrderBD3LM(BD3LM):
                 kv_idx=torch.arange(self.config.length * 2)[None, :],
                 block_size=self.config.block_size,
                 seq_length=self.config.length,
+                mask_decoder=False,
             )
             decoder_mask_static_mask = self._decoder_block_mask(
                 b=None,
@@ -1192,10 +1202,6 @@ class AnyOrderBD3LM(BD3LM):
         ).squeeze(-1)
 
         loss = -log_p_theta
-        if not self.training:
-            denoiser_inputs.tokens_mask = denoiser_inputs.tokens_mask * (
-                denoiser_inputs.x0 != self.pad_token_id
-            )
         nlls = loss * denoiser_inputs.tokens_mask
         count = denoiser_inputs.tokens_mask.sum()
         batch_nll = nlls.sum()
@@ -1231,22 +1237,47 @@ class AnyOrderBD3LM(BD3LM):
             alpha_t_prime = alpha_t_prime[..., None]
 
         # permute input ids (where context_mask > 0 and attention_mask > 0)
-        permute_flag = (context_mask != 1).bool() & (attention_mask > 0).bool()
+        permute_flag = torch.logical_and(
+            (context_mask != 1).bool(), (attention_mask > 0).bool()
+        )
         perm_indices = None
         xt = input_ids.clone()
 
-        batch_size, context_len = input_ids.shape
+        batch_size, seq_len = input_ids.shape
         if permute_flag.any():
-            n_blocks = context_len // self.block_size
-
-            to_permute = permute_flag.view(batch_size, n_blocks, self.block_size)
-            rand = torch.rand(
-                batch_size, n_blocks, self.block_size, device=input_ids.device
+            n_blocks = seq_len // self.block_size
+            rand = torch.rand(batch_size, seq_len, device=input_ids.device)
+            # Tokens outside attn_mask (i.e., right-padded ones) are not permuted
+            # Edge case: Context tokens not aligned to block size are not permuted
+            big_sentinel = (
+                rand.max()
+                + 1e2
+                + torch.arange(seq_len, device=input_ids.device)[None, ...]
             )
-            rand = torch.where(to_permute, rand, float("inf"))
-            # sort is stable on cpu
-            perm_indices = torch.argsort(rand.cpu(), dim=-1, descending=True).to(
-                rand.device
+            small_sentinel = (
+                rand.min()
+                - 1e2
+                - torch.arange(start=seq_len, end=0, step=-1, device=input_ids.device)[
+                    None, ...
+                ]
+            )
+            context_edge_case = torch.logical_and(
+                (context_mask == 1).bool(),
+                (
+                    torch.arange(seq_len, device=input_ids.device)[None, ...]
+                    >= self.block_size
+                    * (context_mask.sum(dim=-1) // self.block_size)[..., None]
+                ),
+            )
+            rand = torch.where(
+                context_edge_case,
+                small_sentinel,
+                torch.where(permute_flag, rand, big_sentinel),
+            )
+            perm_indices = torch.argsort(
+                rand.view(batch_size, n_blocks, self.block_size),
+                stable=True,  # TODO Double check that this is truly stable
+                dim=-1,
             )
             block_offset = (
                 torch.arange(n_blocks, device=input_ids.device)[None, :, None]
@@ -1277,7 +1308,6 @@ class AnyOrderBD3LM(BD3LM):
             )
             if permute_flag.any():
                 seq_len = input_ids.shape[1]
-                seq_indices = torch.arange(seq_len, device=input_ids.device)
                 decoder_attention_mask = torch.gather(
                     decoder_attention_mask,
                     dim=-2,
@@ -1313,8 +1343,6 @@ class AnyOrderBD3LM(BD3LM):
                         batch_size, seq_len, decoder_attention_mask_context.shape[-1]
                     ),
                 )
-                # inner-encoder tokens should self-attend
-                decoder_attention_mask_context[:, -seq_indices, -seq_indices] = 1
 
             decoder_attention_mask = preprocess_attention_mask(
                 decoder_attention_mask[:, None], dtype=torch.float
@@ -1328,18 +1356,19 @@ class AnyOrderBD3LM(BD3LM):
             xt = torch.where(
                 (attention_mask == 1) & (context_mask == 0), self.mask_token_id, xt
             )
+            tokens_mask = attention_mask * (1 - context_mask)
             return DenoiserInput(
                 xt=xt,  # type: ignore
                 x0=input_ids,
                 attention_mask=decoder_attention_mask,  # type: ignore
-                tokens_mask=attention_mask * (1 - context_mask),
+                tokens_mask=tokens_mask,
                 t=t,
                 alpha_t=alpha_t,
                 alpha_t_prime=alpha_t_prime,
                 backbone_kwargs={
                     "encoder_input_ids": input_ids,
                     "encoder_attention_mask": encoder_attention_mask,
-                    "attention_mask_context": decoder_attention_mask_context,
+                    "attention_mask_block_context": decoder_attention_mask_context,
                     "input_ids_context": input_ids,
                 },
             )
@@ -1351,103 +1380,78 @@ class AnyOrderBD3LM(BD3LM):
         context: torch.LongTensor | None = None,
         context_mask: torch.FloatTensor | None = None,
         past_key_values: DynamicCache | None = None,
-        return_past_key_values: bool = False,
         position_ids: torch.LongTensor | None = None,
         encoder_position_ids: torch.LongTensor | None = None,
-        new_context_ids: torch.LongTensor | None = None,
+        new_context: torch.LongTensor | None = None,
         new_context_position_ids: torch.LongTensor | None = None,
+        return_past_key_values_inner_encoder: bool = False,
+        return_past_key_values_outer_encoder: bool = False,
         **backbone_kwargs: Any,
     ) -> DenoiserInput:
         assert (
-            input_ids is not None or context is not None or new_context_ids is not None
-        ), "Must provide either input_ids or context."
-        batch_size = (
-            input_ids.shape[0]
-            if input_ids is not None
-            else (
-                new_context_ids.shape[0]
-                if new_context_ids is not None
-                else context.shape[0]
-            )
-        )
-        decoder_attention_mask_context = None
+            input_ids is not None or context is not None or new_context is not None
+        ), "Must provide either input_ids, context, or new_context."
+        assert not (
+            return_past_key_values_outer_encoder
+            and return_past_key_values_inner_encoder
+        ), "Cannot try to cache both the inner and outer encoders."
         device = (
             input_ids.device
             if input_ids is not None
-            else (
-                new_context_ids.device
-                if new_context_ids is not None
-                else context.device
-            )
+            else (context.device if context is not None else new_context.device)
         )
-        seq_len = (
-            input_ids.shape[1]
-            if input_ids is not None
-            else (new_context_ids.shape[1] if new_context_ids is not None else None)
-        )
-        if past_key_values is not None:
+        if return_past_key_values_inner_encoder:  # (Inner) Cache new tokens w/in block
+            new_context = input_ids
+            input_ids = None
+        if return_past_key_values_outer_encoder:  # (Outer) Cache new block / context
+            context = input_ids
+            input_ids = None
+        if past_key_values is not None:  # Using kv-cache
             cache_len = self._get_past_key_values_seq_length(past_key_values)
-            context_len = cache_len
-            if seq_len is not None:  # Skip enc: nothing new for enc to cache
-                full_seq_length = cache_len + seq_len
+            if input_ids is not None:  # Skip encoders: nothing new to cache
+                assert position_ids is not None, (
+                    "Must provide position_ids for any-order decoding."
+                )
                 encoder_attention_mask = None
-            if new_context_ids is not None:  # Caching new tokens in the dec
-                decoder_attention_mask_context = torch.ones(
-                    (batch_size, 1, new_context_ids.shape[1], full_seq_length),
-                    device=device,
-                )  # Make attention mask 4D
-
-                return DenoiserInput(
-                    xt=None,
-                    attention_mask=None,
-                    context_mask=context_mask,
-                    past_key_values=past_key_values,
-                    backbone_kwargs={
-                        "attention_mask_block_context": decoder_attention_mask_context,
-                        "position_ids_context": new_context_position_ids,
-                        "input_ids_context": new_context_ids,
-                    },
-                )
-
-            if seq_len is None:  # Caching new tokens in the enc
-                full_seq_length = cache_len + context.shape[-1]
-                encoder_attention_mask = self.encoder_static_attention_mask[
-                    None, None, cache_len:full_seq_length, :full_seq_length
-                ]  # Make attention mask 4D
-                encoder_position_ids = torch.arange(cache_len, full_seq_length).to(
-                    device
-                )[None, :]
-                encoder_attention_mask = preprocess_attention_mask(
-                    encoder_attention_mask, dtype=torch.float
-                )
-        else:  # Caching context for the first time / not using kv-cache at all
-            assert new_context_ids is None, (
-                "Cannot cache new context without past_key_values."
+                attention_mask_block_context = None
+            else:  # Caching new tokens in inner/outer encoder
+                if new_context is not None:  # inner encoder
+                    assert new_context_position_ids is not None, (
+                        "Must provide new_context_position_ids when caching new tokens "
+                        "inside a block."
+                    )
+                    full_seq_length = cache_len + new_context.shape[-1]
+                    attention_mask_block_context = self.static_attention_mask_context[
+                        None, None, cache_len:full_seq_length, :full_seq_length
+                    ]  # Make attention mask 4D
+                    attention_mask_block_context[
+                        ..., new_context.shape[-1], new_context.shape[-1]
+                    ] = 1  # Enable self-attn
+                    attention_mask_block_context = preprocess_attention_mask(
+                        attention_mask_block_context, dtype=torch.float
+                    )
+                    encoder_attention_mask = None
+                else:  # outer encoder
+                    full_seq_length = cache_len + context.shape[-1]
+                    encoder_attention_mask = self.encoder_static_attention_mask[
+                        None, None, cache_len:full_seq_length, :full_seq_length
+                    ]  # Make attention mask 4D
+                    encoder_position_ids = torch.arange(cache_len, full_seq_length).to(
+                        device
+                    )[None, :]
+                    encoder_attention_mask = preprocess_attention_mask(
+                        encoder_attention_mask, dtype=torch.float
+                    )
+                    attention_mask_block_context = None
+        else:  # Not using kv-cache
+            raise NotImplementedError(
+                "Non-KV caching AO prepare inputs for inference not implemented."
             )
-            if context is not None:
-                context_len = context.shape[1]
-            else:
-                context_len = 0
-            if seq_len is not None:
-                full_seq_length = context_len + seq_len
-            else:
-                full_seq_length = context_len
-            encoder_attention_mask = self.encoder_static_attention_mask[
-                None, None, :context_len, :context_len
-            ]  # Make attention mask 4D
-            encoder_attention_mask = preprocess_attention_mask(
-                encoder_attention_mask, dtype=torch.float
-            )
-            position_ids = torch.arange(context_len, full_seq_length).to(device)[
-                None, :
-            ]
         if input_ids is not None:
-            decoder_attention_mask = torch.ones(
-                (batch_size, 1, input_ids.shape[1], full_seq_length),
-                device=device,
-            )
-            num_query_tokens = (input_ids == self.mask_token_id).sum(dim=1)[0]
-            decoder_attention_mask[:, :, -num_query_tokens:, -num_query_tokens:] = 0
+            full_seq_length = cache_len + input_ids.shape[-1]
+            decoder_attention_mask = self.static_attention_mask[
+                None, None, cache_len:full_seq_length, :full_seq_length
+            ]  # Make attention mask 4D
             decoder_attention_mask = preprocess_attention_mask(
                 decoder_attention_mask, dtype=torch.float
             )
@@ -1459,17 +1463,19 @@ class AnyOrderBD3LM(BD3LM):
             context_mask=context_mask,
             past_key_values=past_key_values,
             backbone_kwargs={
+                "position_ids": position_ids,
+                "input_ids_context": new_context,
+                "attention_mask_block_context": attention_mask_block_context,
+                "position_ids_context": new_context_position_ids,
                 "encoder_input_ids": context,
                 "encoder_position_ids": encoder_position_ids,
                 "encoder_attention_mask": encoder_attention_mask,
-                "position_ids": position_ids,
             },
         )
 
     def update_past_key_values(
         self,
         inputs: torch.LongTensor,
-        encoder_position_ids: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         **backbone_kwargs: Any,
     ) -> DynamicCache:
@@ -1482,23 +1488,22 @@ class AnyOrderBD3LM(BD3LM):
             DynamicCache: Cached key-value pairs.
         """
         context_input = self._prepare_inputs_inference(
-            context=inputs,
+            input_ids=inputs,
             past_key_values=past_key_values,
-            encoder_position_ids=encoder_position_ids,
-            return_past_key_values=True,
+            return_past_key_values_outer_encoder=True,
         )
         past_key_values = self._backbone_forward(
             context_input,
             past_key_values=past_key_values,
-            return_past_key_values=True,
+            return_past_key_values_outer_encoder=True,
             **backbone_kwargs,
         )
         return past_key_values
 
     def update_past_key_values_context(
         self,
-        new_context_ids: torch.LongTensor,
-        new_context_position_ids: torch.LongTensor | None = None,
+        inputs: torch.LongTensor,
+        position_ids_context: torch.LongTensor | None = None,
         past_key_values: Cache | None = None,
         **backbone_kwargs: Any,
     ) -> DynamicCache:
@@ -1506,20 +1511,21 @@ class AnyOrderBD3LM(BD3LM):
         Cache the key-value pairs for the context.
         Args:
             inputs (torch.LongTensor): The context tensor.
+            position_ids_context (torch.LongTensor | None): Inner encoder position ids.
             past_key_values (DynamicCache | None): Previous key-value cache.
         Returns:
             DynamicCache: Cached key-value pairs.
         """
         context_input = self._prepare_inputs_inference(
-            new_context_ids=new_context_ids,
+            input_ids=inputs,
             past_key_values=past_key_values,
-            new_context_position_ids=new_context_position_ids,
-            return_past_key_values=True,
+            new_context_position_ids=position_ids_context,
+            return_past_key_values_inner_encoder=True,
         )
         past_key_values = self._backbone_forward(
             context_input,
             past_key_values=past_key_values,
-            return_past_key_values=True,
+            return_past_key_values_inner_encoder=True,
             **backbone_kwargs,
         )
         return past_key_values
@@ -1572,7 +1578,6 @@ class AnyOrderBD3LM(BD3LM):
         all_position_ids = torch.arange(
             inputs.shape[-1] + max_blocks * block_size, device=device
         )[None, :]
-        past_key_values = None
 
         # Sample max generation length tensor from prior
         accumulated_samples = self._sample_prior(
@@ -1589,11 +1594,11 @@ class AnyOrderBD3LM(BD3LM):
         if generation_config.use_cache and inputs.numel() > 0:
             past_key_values = self.update_past_key_values(
                 inputs=inputs,
-                past_key_values=past_key_values,
+                past_key_values=DynamicCache(),
             )
             inputs_offset = inputs.shape[-1]
         else:
-            past_key_values = None
+            past_key_values = DynamicCache() if generation_config.use_cache else None
             inputs_offset = 0
 
         total_NFEs = 0
@@ -1684,7 +1689,7 @@ class AnyOrderBD3LM(BD3LM):
                         # Last generated token will be provided as first token in inputs
                         #  to next block, and so we do not cache it here
                         xs = xs[..., :-1]
-                    # Enode unmasked tokens only
+                    # Encode unmasked tokens only
                     past_key_values = self.update_past_key_values_context(
                         new_context_ids=xs[xs != self.mask_token_id].unsqueeze(0),
                         new_context_position_ids=xt_position_ids[
