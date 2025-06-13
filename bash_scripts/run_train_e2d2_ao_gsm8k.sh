@@ -6,7 +6,6 @@ source setup_env.sh
 
 # Important variables (fix during hyperparam sweep)
 BLOCK_SIZE=4
-USE_ENCODER_CAUSAL_MASK=false # true, false
 KEEP_BOTTOM_N_ENCODER_LAYERS=-1
 KEEP_TOP_N_DECODER_LAYERS=7
 
@@ -18,7 +17,7 @@ MAX_DURATION="20000ba" # 20000ba, 10000ba, 5000ba
 
 PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-0.6B-Base # Qwen/Qwen3-0.6B-Base, Qwen/Qwen3-1.7B-Base, microsoft/Phi-4-mini-reasoning
 
-TAG=e2d2_ao_noshift_noema_qwen600M_v4
+TAG=e2d2_ao_noshift_noema_mask-diagonal_untie-qwen600M_v1
 RUN_NAME=gsm8k-block${BLOCK_SIZE}-keepbottomenc${KEEP_BOTTOM_N_ENCODER_LAYERS}-keeptopdec${KEEP_TOP_N_DECODER_LAYERS}-${TAG}
 
 MICRO_BATCH_SIZE=1
@@ -38,11 +37,13 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   model=ao_bd3lm \
   model/backbone@model.config.backbone_config=llm_as_encoder_decoder_aoarm \
   model.config.length=768 \
-  model.config.shift_logits=true \
+  model.config.shift_logits=false \
   model.config.backbone_config.keep_bottom_n_encoder_layers=${KEEP_BOTTOM_N_ENCODER_LAYERS} \
   model.config.backbone_config.keep_top_n_decoder_layers=${KEEP_TOP_N_DECODER_LAYERS} \
-  model.config.backbone_config.tie_encoder_decoder_weights=true \
-  model.config.backbone_config.use_encoder_causal_mask=${USE_ENCODER_CAUSAL_MASK} \
+  model.config.backbone_config.tie_encoder_decoder_weights=false \
+  model.config.backbone_config.use_encoder_causal_mask=false \
+  model.config.backbone_config.reinit_encoder=false \
+  model.config.backbone_config.reinit_decoder=false \
   training.global_batch_size=${BATCH_SIZE} \
   training.grad_accum=$(( BATCH_SIZE / NUM_VISIBLE_DEVICES / MICRO_BATCH_SIZE )) \
   ~composer.trainer.compile_config \

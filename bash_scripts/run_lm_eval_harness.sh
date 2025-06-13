@@ -7,15 +7,20 @@ source setup_env.sh
 #OUTPUT_DIR="${MODEL_PATH}/lm_eval_harness_output"
 #REVISION=null
 
-# New HF
-MODEL_PATH="kuleshov-group/gsm8k-block4-keepbottomenc-1-keeptopdec14-e2d2_qwen2B"
-OUTPUT_DIR="${RUN_DIR}/${MODEL_PATH}/lm_eval_harness_output"
-REVISION="946176208f91301bbfa7feb42db6996cc98074c1" #null
-
+## New HF
+#MODEL_PATH="kuleshov-group/gsm8k-block4-keepbottomenc-1-keeptopdec14-e2d2_qwen2B"
+#OUTPUT_DIR="${RUN_DIR}/${MODEL_PATH}/lm_eval_harness_output"
+#REVISION="946176208f91301bbfa7feb42db6996cc98074c1" #null
+#
 ## Old NeurIPS
 #MODEL_PATH="/share/kuleshov/ma2238/runs/dllm-dev/gsm8k-block4-bs96-keep1-causalencfalse-max20000ba-lr1e-5-warmup1000ba-gc1.0-wd1e-5-e2d2_qwen2B_keeptop_tie_noema_v2"
 #OUTPUT_DIR="${MODEL_PATH}/lm_eval_harness_output"
 #REVISION=null
+
+# AO e2d2
+MODEL_PATH="/share/kuleshov/ma2238/runs/dllm-dev/gsm8k-block4-keepbottomenc-1-keeptopdec7-e2d2_ao_noshift_qwen600M_fixback_v2"
+OUTPUT_DIR="${MODEL_PATH}/lm_eval_harness_output"
+REVISION=null
 
 mkdir -p ${OUTPUT_DIR}
 L=256
@@ -39,7 +44,7 @@ accelerate launch scripts/eval/harness_eval.py \
   pretrained_model_name_or_path=${MODEL_PATH} \
   pretrained_model_revision=${REVISION} \
   task.model.ckpt_file=${CKPT_FILE} \
-  tokenizer.pretrained_model_name_or_path="Qwen/Qwen3-1.7B-Base" \
+  tokenizer.pretrained_model_name_or_path="Qwen/Qwen3-0.6B-Base" \
   output_path=${OUTPUT_PATH} \
   generated_samples_output_path=${OUTPUT_PATH} \
   max_new_tokens=${L} \

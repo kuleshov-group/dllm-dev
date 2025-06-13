@@ -27,7 +27,7 @@ fi
 WATCH_FOLDER=$(realpath "../watch_folder")
 mkdir -p ${WATCH_FOLDER}
 USERNAME=$(whoami)
-NUM_VISIBLE_DEVICES=8
+NUM_VISIBLE_DEVICES=4
 RUN_DIR="/share/kuleshov/${USERNAME}/runs/dllm-dev"
 sbatch \
   --job-name=${script_name:4:-3} \
