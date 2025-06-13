@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Union
 
 import hydra.utils
 import torch
@@ -54,7 +54,7 @@ class DenoiserInput(OrderedDict):
     t: Optional[torch.FloatTensor] = None  # (B,)
     alpha_t: Optional[torch.FloatTensor] = None  # (B,) | (B, 1) | (B, 1, 1)
     alpha_t_prime: Optional[torch.FloatTensor] = None  # (B,) | (B, 1) | (B, 1, 1)
-    past_key_values: Optional[torch.FloatTensor] = None  # (B, ctx_len, D)
+    past_key_values: Optional[Union[torch.FloatTensor, Cache]] = None  # (B, ctx_len, D)
     # Placeholder in case future experiments require different inputs
     backbone_kwargs: dict[str, Any] = field(default_factory=dict)
 
