@@ -51,7 +51,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                 trust_remote_code=True,
                 attn_implementation=attn_backend,
             )
-            self.encoder = CustomQwen3ForCausalLM.from_config(encoder_config)
+            self.encoder = CustomQwen3ForCausalLM(encoder_config)
         else:
             self.encoder = CustomQwen3ForCausalLM.from_pretrained(
                 pretrained_model_name_or_path,
@@ -84,7 +84,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
 
         # tie encoder and decoder weights
         if tie_encoder_decoder_weights:
-            assert not freeze_encoder
+            assert not freeze_encoder, "Cannot freeze encoder when tying weights."
             self.decoder = self.encoder
 
         else:
@@ -128,7 +128,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
             if (
                 self.encoder.lm_head.weight.data_ptr()
                 == self.encoder.model.embed_tokens.weight.data_ptr()
-            ):  # noqa: E501
+            ):
                 self.decoder.lm_head = self.encoder.lm_head
             else:
                 del self.encoder.lm_head
@@ -148,7 +148,8 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
         past_key_values: DynamicCache | None = None,
         position_ids: torch.LongTensor | None = None,
         encoder_position_ids: torch.LongTensor | None = None,
-        return_past_key_values: bool = False,
+        return_past_key_values_inner_encoder: bool = False,
+        return_past_key_values_outer_encoder: bool = False,
         **flash_attn_kwargs: Unpack[FlashAttentionKwargs],
     ) -> torch.FloatTensor | DynamicCache:
         if past_key_values is None:
@@ -161,7 +162,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                     encoder_input_ids.shape[-1], device=encoder_input_ids.device
                 ).unsqueeze(0)
             if self.use_encoder_causal_mask:
-                encoder_attention_mask = None  # must use causal mask
+                encoder_attention_mask = None  # Forces encoder to use causal mask
             past_key_values = self.encoder.model(
                 input_ids=encoder_input_ids,
                 attention_mask=encoder_attention_mask,
@@ -170,7 +171,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                 past_key_values=past_key_values,
                 cache_position=encoder_position_ids[0],
             ).past_key_values
-            if return_past_key_values:
+            if return_past_key_values_outer_encoder:
                 return past_key_values
 
         # Encode block context
@@ -182,14 +183,6 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                 position_ids_context = torch.arange(
                     input_ids_context.shape[-1], device=input_ids_context.device
                 ).unsqueeze(0)
-            # noinspection PyProtectedMember
-            attention_mask_block_context = self.decoder.model._update_causal_mask(
-                attention_mask=attention_mask_block_context,
-                input_tensor=decoder_hidden_states_context,
-                cache_position=position_ids_context[0],
-                past_key_values=past_key_values,
-                output_attentions=False,
-            )
             position_embeddings_context = self.decoder.model.rotary_emb(
                 decoder_hidden_states_context, position_ids_context
             )
@@ -200,9 +193,8 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                     continue
 
                 # TODO maybe adopt gradient checkpointing from transformers
-
-                # Cross-attend to encoder kvs
-                decoder_hidden_states_context = decoder_layer(
+                # Cross-attend to outer encoder kvs
+                _ = decoder_layer(  # past_key_values are updated in-place
                     hidden_states=decoder_hidden_states_context,
                     attention_mask=attention_mask_block_context,
                     position_ids=position_ids_context,
@@ -212,8 +204,8 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                     cache_position=position_ids_context[0],
                     position_embeddings=position_embeddings_context,
                     **flash_attn_kwargs,
-                )[0]
-            if return_past_key_values:
+                )
+            if return_past_key_values_inner_encoder:
                 return past_key_values
 
         # Run decoder with xattn to clean tokens
@@ -226,16 +218,6 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
             decoder_hidden_states, position_ids
         )
 
-        # noinspection PyProtectedMember
-        attention_mask = self.decoder.model._update_causal_mask(
-            attention_mask=attention_mask,
-            input_tensor=decoder_hidden_states,
-            cache_position=position_ids[0],
-            past_key_values=past_key_values,
-            output_attentions=False,
-        )
-
-        # Decode masks
         for decoder_layer in self.decoder.model.layers:
             layer_idx = decoder_layer.self_attn.layer_idx
             if layer_idx not in self.decoder_layers_to_keep:
@@ -259,8 +241,8 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                 **flash_attn_kwargs,
             )[0]
             if past_key_values is not None:
-                # DynamicCache extends along sequence dimension by default
-                # truncating back to original, encoder output length
+                # DynamicCache extends along sequence dimension by default.
+                # Truncate back to original, encoder output length
                 past_key_values.key_cache[layer_idx] = past_key_values.key_cache[
                     layer_idx
                 ][..., :prev_cache_len, :]
