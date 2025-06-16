@@ -1194,9 +1194,6 @@ class AnyOrderBD3LM(BD3LM):
         denoiser_inputs: DenoiserInput,
         **kwargs,
     ) -> torch.FloatTensor:
-        if self.training:
-            encoder_output = backbone_output[1]
-            backbone_output = backbone_output[0]
         if self.config.shift_logits:
             backbone_output = backbone_output[:, :-1, ...]
         # Zero-mask probability
@@ -1204,8 +1201,6 @@ class AnyOrderBD3LM(BD3LM):
         log_probs = backbone_output - torch.logsumexp(
             backbone_output, dim=-1, keepdim=True
         )
-        if self.training:
-            return log_probs, torch.log_softmax(encoder_output, dim=-1)
         return log_probs  # type: ignore
 
     def _compute_loss(
@@ -1214,9 +1209,6 @@ class AnyOrderBD3LM(BD3LM):
         denoiser_inputs: DenoiserInput,
         **kwargs: Any,
     ) -> LossAndNllOutput:
-        if self.training:
-            encoder_output = model_output[1]
-            model_output = model_output[0]
         if self.config.shift_logits:
             denoiser_inputs.x0 = denoiser_inputs.x0[..., 1:]
             denoiser_inputs.tokens_mask = denoiser_inputs.tokens_mask[..., 1:]
@@ -1267,41 +1259,17 @@ class AnyOrderBD3LM(BD3LM):
                 nlls * context_size_2_out_of_order
             ).sum() / context_size_2_out_of_order.sum()
 
-        if self.training:
-            encoder_loss = -torch.gather(
-                input=encoder_output[..., : -self.block_size, :],
-                dim=-1,
-                index=denoiser_inputs.x0[..., self.block_size :, None],
-            ).squeeze(-1)
-
-            encoder_batch_nll = (
-                encoder_loss * denoiser_inputs.tokens_mask[..., : -self.block_size]
-            ).sum()
-            token_nll = (batch_nll + encoder_batch_nll) / count
-            return LossAndNllOutput(
-                loss=token_nll,
-                nlls=nlls,  # type: ignore
-                other_loss_terms={
-                    "decoder_loss": batch_nll / count,
-                    "encoder_loss": encoder_batch_nll / count,
-                    "context_size_1_ar_order_loss": context_size_1_ar_order_loss,
-                    "context_size_2_ar_order_loss": context_size_2_ar_order_loss,
-                    "context_size_1_out_of_order_loss": context_size_1_out_of_order_loss,  # noqa: E501
-                    "context_size_2_out_of_order_loss": context_size_2_out_of_order_loss,  # noqa: E501
-                },
-            )
-        else:
-            token_nll = batch_nll / count
-            return LossAndNllOutput(
-                loss=token_nll,
-                nlls=nlls,  # type: ignore
-                other_loss_terms={
-                    "context_size_1_ar_order_loss": context_size_1_ar_order_loss,
-                    "context_size_2_ar_order_loss": context_size_2_ar_order_loss,
-                    "context_size_1_out_of_order_loss": context_size_1_out_of_order_loss,  # noqa: E501
-                    "context_size_2_out_of_order_loss": context_size_2_out_of_order_loss,  # noqa: E501
-                },
-            )
+        token_nll = batch_nll / count
+        return LossAndNllOutput(
+            loss=token_nll,
+            nlls=nlls,  # type: ignore
+            other_loss_terms={
+                "context_size_1_ar_order_loss": context_size_1_ar_order_loss,
+                "context_size_2_ar_order_loss": context_size_2_ar_order_loss,
+                "context_size_1_out_of_order_loss": context_size_1_out_of_order_loss,
+                "context_size_2_out_of_order_loss": context_size_2_out_of_order_loss,
+            },
+        )
 
     def _prepare_inputs(
         self,
