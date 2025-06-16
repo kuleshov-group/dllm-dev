@@ -60,10 +60,11 @@ class CustomQwen3Attention(Qwen3Attention):
             )
 
         # NOTE: downcast for flex-attention compatibility
-        query_states, key_states = (
-            query_states.to(value_states.dtype),
-            key_states.to(value_states.dtype),
-        )
+        # TODO: Maybe upcast V to QK dtype instead?
+        # query_states, key_states = (
+        #     query_states.to(value_states.dtype),
+        #     key_states.to(value_states.dtype),
+        # )
 
         attention_interface: Callable = eager_attention_forward
         if self.config._attn_implementation != "eager":
