@@ -27,7 +27,6 @@ from scripts.utils import (
     register_useful_resolvers,
     set_seed,
 )
-from src.denoiser.diffusion import BD3LM
 from src.utils import fsspec_exists
 
 
@@ -91,10 +90,7 @@ class LMEvalHarnessModel(LM):
                     trust_remote_code=True,
                     revision=pretrained_model_revision,
                 )
-        # TODO: HACK FOR DEBUGGING
-        new_model = BD3LM(model.config)
-        new_model.load_state_dict(model.state_dict())
-        self.model = new_model.to(self.device)  # model.to(self.device)
+        self.model = model.to(self.device)
         self.model.eval()
         self.tokenizer = tokenizer
         self.gen_kwargs = gen_kwargs
