@@ -19,6 +19,16 @@ from src.denoiser.base import (
 )
 
 
+def preprocess_attention_mask(attention_mask, dtype):
+    min_dtype = torch.finfo(dtype).min
+    attention_mask = torch.where(
+        (attention_mask == 0.0).bool(),  # type: ignore
+        min_dtype,
+        0.0,
+    ).to(dtype)
+    return attention_mask
+
+
 class ARConfig(DenoiserConfig):
     """Configuration class for autoregressive (AR) models."""
 
@@ -58,6 +68,40 @@ class AR(Denoiser):
         config: ARConfig,
     ):
         super().__init__(config)
+        self.block_size = 1
+        static_mask = self._decoder_block_mask(
+            b=None,
+            h=None,
+            q_idx=torch.arange(self.config.length - self.block_size)[:, None],
+            kv_idx=torch.arange(self.config.length - self.block_size)[None, :],
+            block_size=self.block_size,
+            seq_length=self.config.length - self.block_size,
+            mask_decoder=False,
+        )
+        self.register_buffer(
+            "static_attention_mask",
+            static_mask,
+        )
+
+    # noinspection PyUnusedLocal
+    @staticmethod
+    def _decoder_block_mask(
+        b,
+        h,
+        q_idx,
+        kv_idx,
+        block_size: int | None = None,
+        seq_length: int | None = None,
+        mask_decoder: bool = False,
+    ) -> torch.Tensor:
+        del b, h
+
+        # Compute block indices
+        block_q = q_idx // block_size
+        block_kv = (kv_idx % seq_length) // block_size
+
+        # **1. Offset Block-Causal Mask (M_OBC) **
+        return block_q >= block_kv
 
     def _prepare_inputs(
         self,
@@ -68,20 +112,26 @@ class AR(Denoiser):
         past_key_values: Cache | None = None,
     ) -> DenoiserInput:
         # Prepare inputs for autoregressive model
-        labels = copy.deepcopy(input_ids[..., 1:])[..., None]
-        input_ids = input_ids[..., :-1]
+        labels = copy.deepcopy(input_ids[..., self.block_size :])[..., None]
         if attention_mask is None:
             attention_mask = torch.ones_like(input_ids)
-        elif attention_mask.shape != input_ids.shape:
-            attention_mask = attention_mask[..., :-1]
         if context_mask is None:
             context_mask = torch.zeros_like(attention_mask)
-        else:
-            context_mask = context_mask[..., :-1]
+        attention_mask = attention_mask[..., : -self.block_size]
+        context_mask = context_mask[..., : -self.block_size]
+        input_ids = input_ids[..., : -self.block_size]
+        decoder_attention_mask = (
+            self.static_attention_mask[None, ...]
+            & attention_mask[:, None, :]
+            & attention_mask[..., None]
+        )
+        decoder_attention_mask = preprocess_attention_mask(
+            decoder_attention_mask[:, None], dtype=torch.float
+        )
         return DenoiserInput(
             xt=input_ids,  # type: ignore
             x0=labels,  # type: ignore
-            attention_mask=attention_mask,
+            attention_mask=decoder_attention_mask,  # type: ignore
             context_mask=context_mask,
             tokens_mask=attention_mask * (1 - context_mask),
             past_key_values=past_key_values,

@@ -15,14 +15,15 @@ class Loss(Metric):
     # Make torchmetrics call update only once
     full_state_update = False
 
-    def __init__(self, dist_sync_on_step=False):
+    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        self.name = "loss"
+        self.name = name
+        self.update_key = update_key  # Can be used to track different loss terms
         self.add_state("sum_loss", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("total_batches", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, output: Mapping | Tensor, target: Tensor) -> None:
-        loss = output["loss"]
+        loss = output[self.update_key]
         self.sum_loss += loss
         self.total_batches += 1
 
@@ -30,13 +31,55 @@ class Loss(Metric):
         return self.sum_loss / self.total_batches
 
 
+class EncoderLoss(Loss):
+    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
+        super().__init__(
+            name=name, update_key=update_key, dist_sync_on_step=dist_sync_on_step
+        )
+
+
+class DecoderLoss(Loss):
+    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
+        super().__init__(
+            name=name, update_key=update_key, dist_sync_on_step=dist_sync_on_step
+        )
+
+
+class ContextSize1AROrderLoss(Loss):
+    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
+        super().__init__(
+            name=name, update_key=update_key, dist_sync_on_step=dist_sync_on_step
+        )
+
+
+class ContextSize2AROrderLoss(Loss):
+    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
+        super().__init__(
+            name=name, update_key=update_key, dist_sync_on_step=dist_sync_on_step
+        )
+
+
+class ContextSize1OutOfOrderLoss(Loss):
+    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
+        super().__init__(
+            name=name, update_key=update_key, dist_sync_on_step=dist_sync_on_step
+        )
+
+
+class ContextSize2OutOfOrderLoss(Loss):
+    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
+        super().__init__(
+            name=name, update_key=update_key, dist_sync_on_step=dist_sync_on_step
+        )
+
+
 class NLL(Metric):
     # Make torchmetrics call update only once
     full_state_update = False
 
-    def __init__(self, dist_sync_on_step=False):
+    def __init__(self, name="nll", dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        self.name = "nll"
+        self.name = name
         self.add_state("mean_nll", default=torch.tensor(0.0), dist_reduce_fx="sum")
         self.add_state("weight", default=torch.tensor(0), dist_reduce_fx="sum")
 
@@ -68,9 +111,9 @@ class NLL(Metric):
 
 
 class BPD(NLL):
-    def __init__(self, dist_sync_on_step=False):
+    def __init__(self, name="bpd", dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        self.name = "bpd"
+        self.name = name
 
     def compute(self) -> Tensor:
         """Computes the bits per dimension.
@@ -82,9 +125,9 @@ class BPD(NLL):
 
 
 class Perplexity(NLL):
-    def __init__(self, dist_sync_on_step=False):
+    def __init__(self, name="ppl", dist_sync_on_step=False):
         super().__init__(dist_sync_on_step=dist_sync_on_step)
-        self.name = "ppl"
+        self.name = name
 
     def compute(self) -> Tensor:
         """Computes the Perplexity.

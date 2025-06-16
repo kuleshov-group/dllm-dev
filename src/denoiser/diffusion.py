@@ -1188,12 +1188,35 @@ class AnyOrderBD3LM(BD3LM):
                 decoder_context_mask,
             )
 
+    def _forward(
+        self,
+        backbone_output: torch.FloatTensor,
+        denoiser_inputs: DenoiserInput,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        if self.training:
+            encoder_output = backbone_output[1]
+            backbone_output = backbone_output[0]
+        if self.config.shift_logits:
+            backbone_output = backbone_output[:, :-1, ...]
+        # Zero-mask probability
+        backbone_output[..., self.mask_token_id] = self.neg_infinity
+        log_probs = backbone_output - torch.logsumexp(
+            backbone_output, dim=-1, keepdim=True
+        )
+        if self.training:
+            return log_probs, torch.log_softmax(encoder_output, dim=-1)
+        return log_probs  # type: ignore
+
     def _compute_loss(
         self,
         model_output: torch.FloatTensor,
         denoiser_inputs: DenoiserInput,
         **kwargs: Any,
     ) -> LossAndNllOutput:
+        if self.training:
+            encoder_output = model_output[1]
+            model_output = model_output[0]
         if self.config.shift_logits:
             denoiser_inputs.x0 = denoiser_inputs.x0[..., 1:]
             denoiser_inputs.tokens_mask = denoiser_inputs.tokens_mask[..., 1:]
@@ -1205,8 +1228,80 @@ class AnyOrderBD3LM(BD3LM):
         nlls = loss * denoiser_inputs.tokens_mask
         count = denoiser_inputs.tokens_mask.sum()
         batch_nll = nlls.sum()
-        token_nll = batch_nll / count
-        return LossAndNllOutput(loss=token_nll, nlls=nlls)  # type: ignore
+        with torch.no_grad():
+            context_size = (
+                (
+                    denoiser_inputs.backbone_kwargs["attention_mask_block_context"][
+                        ..., self.config.length :
+                    ]
+                    == 0.0
+                )
+                .squeeze(1)
+                .sum(dim=-1)
+            )
+            seq_arange = torch.arange(self.config.length, device=loss.device)[None, :]
+            first_index = 1 - seq_arange % 2
+            second_index = seq_arange % 2
+            context_size_1_ar_order = (
+                (context_size == 1) * first_index * denoiser_inputs.tokens_mask
+            )
+            context_size_2_ar_order = (
+                (context_size == 2) * second_index * denoiser_inputs.tokens_mask
+            )
+            context_size_1_out_of_order = (
+                (context_size == 1) * second_index * denoiser_inputs.tokens_mask
+            )
+            context_size_2_out_of_order = (
+                (context_size == 2) * first_index * denoiser_inputs.tokens_mask
+            )
+            context_size_1_ar_order_loss = (
+                nlls * context_size_1_ar_order
+            ).sum() / context_size_1_ar_order.sum()
+            context_size_2_ar_order_loss = (
+                nlls * context_size_2_ar_order
+            ).sum() / context_size_2_ar_order.sum()
+            context_size_1_out_of_order_loss = (
+                nlls * context_size_1_out_of_order
+            ).sum() / context_size_1_out_of_order.sum()
+            context_size_2_out_of_order_loss = (
+                nlls * context_size_2_out_of_order
+            ).sum() / context_size_2_out_of_order.sum()
+
+        if self.training:
+            encoder_loss = -torch.gather(
+                input=encoder_output[..., : -self.block_size, :],
+                dim=-1,
+                index=denoiser_inputs.x0[..., self.block_size :, None],
+            ).squeeze(-1)
+
+            encoder_batch_nll = (
+                encoder_loss * denoiser_inputs.tokens_mask[..., : -self.block_size]
+            ).sum()
+            token_nll = (batch_nll + encoder_batch_nll) / count
+            return LossAndNllOutput(
+                loss=token_nll,
+                nlls=nlls,  # type: ignore
+                other_loss_terms={
+                    "decoder_loss": batch_nll / count,
+                    "encoder_loss": encoder_batch_nll / count,
+                    "context_size_1_ar_order_loss": context_size_1_ar_order_loss,
+                    "context_size_2_ar_order_loss": context_size_2_ar_order_loss,
+                    "context_size_1_out_of_order_loss": context_size_1_out_of_order_loss,  # noqa: E501
+                    "context_size_2_out_of_order_loss": context_size_2_out_of_order_loss,  # noqa: E501
+                },
+            )
+        else:
+            token_nll = batch_nll / count
+            return LossAndNllOutput(
+                loss=token_nll,
+                nlls=nlls,  # type: ignore
+                other_loss_terms={
+                    "context_size_1_ar_order_loss": context_size_1_ar_order_loss,
+                    "context_size_2_ar_order_loss": context_size_2_ar_order_loss,
+                    "context_size_1_out_of_order_loss": context_size_1_out_of_order_loss,  # noqa: E501
+                    "context_size_2_out_of_order_loss": context_size_2_out_of_order_loss,  # noqa: E501
+                },
+            )
 
     def _prepare_inputs(
         self,
@@ -1361,6 +1456,7 @@ class AnyOrderBD3LM(BD3LM):
                 xt=xt,  # type: ignore
                 x0=input_ids,
                 attention_mask=decoder_attention_mask,  # type: ignore
+                context_mask=context_mask,
                 tokens_mask=tokens_mask,
                 t=t,
                 alpha_t=alpha_t,
@@ -1730,21 +1826,6 @@ class AnyOrderBD3LM(BD3LM):
                     ]
                     break
         return accumulated_samples  # type: ignore
-
-    def _forward(
-        self,
-        backbone_output: torch.FloatTensor,
-        denoiser_inputs: DenoiserInput,
-        **kwargs,
-    ) -> torch.FloatTensor:
-        if self.config.shift_logits:
-            backbone_output = backbone_output[:, :-1, ...]
-        # Zero-mask probability
-        backbone_output[..., self.mask_token_id] = self.neg_infinity
-        log_probs = backbone_output - torch.logsumexp(
-            backbone_output, dim=-1, keepdim=True
-        )
-        return log_probs  # type: ignore
 
 
 # TODO
