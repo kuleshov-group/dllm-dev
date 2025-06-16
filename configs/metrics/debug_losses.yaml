@@ -1,13 +1,3 @@
-encoder_loss:
-  _target_: src.tasks.metrics.EncoderLoss
-  name: encoder_loss
-  update_key: encoder_loss
-
-decoder_loss:
-  _target_: src.tasks.metrics.DecoderLoss
-  name: decoder_loss
-  update_key: decoder_loss
-
 context_size_1_ar_order_loss:
   _target_: src.tasks.metrics.ContextSize1AROrderLoss
   name: context_size_1_ar_order_loss

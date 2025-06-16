@@ -31,20 +31,6 @@ class Loss(Metric):
         return self.sum_loss / self.total_batches
 
 
-class EncoderLoss(Loss):
-    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
-        super().__init__(
-            name=name, update_key=update_key, dist_sync_on_step=dist_sync_on_step
-        )
-
-
-class DecoderLoss(Loss):
-    def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
-        super().__init__(
-            name=name, update_key=update_key, dist_sync_on_step=dist_sync_on_step
-        )
-
-
 class ContextSize1AROrderLoss(Loss):
     def __init__(self, name="loss", update_key="loss", dist_sync_on_step=False):
         super().__init__(

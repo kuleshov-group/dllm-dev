@@ -1,5 +1,3 @@
-import copy
-
 import torch
 from torch import nn
 from transformers import AutoConfig
@@ -87,15 +85,7 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
         # tie encoder and decoder weights
         if tie_encoder_decoder_weights:
             assert not freeze_encoder, "Cannot freeze encoder when tying weights."
-            tied_embedding_and_lm_head = (
-                self.encoder.lm_head.weight.data_ptr()
-                == self.encoder.model.embed_tokens.weight.data_ptr()
-            )
-            self.decoder = copy.deepcopy(self.encoder)  # Keep LM head untied
-            self.decoder.model = self.encoder.model  # Only tie model
-            self.encoder.lm_head = copy.deepcopy(self.encoder.lm_head)
-            if tied_embedding_and_lm_head:
-                self.decoder.lm_head.weight = self.encoder.model.embed_tokens.weight
+            self.decoder = self.encoder
 
         else:
             # reinitialize decoder layers
@@ -174,51 +164,70 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                 ).unsqueeze(0)
             if self.use_encoder_causal_mask:
                 encoder_attention_mask = None  # Forces encoder to use causal mask
-            encoder_outputs = self.encoder(  # TODO: changed from self.encoder.model
+            past_key_values = self.encoder.model(
                 input_ids=encoder_input_ids,
                 attention_mask=encoder_attention_mask,
                 position_ids=encoder_position_ids,
                 use_cache=True,
                 past_key_values=past_key_values,
                 cache_position=encoder_position_ids[0],
-            )
-            past_key_values = encoder_outputs.past_key_values
+            ).past_key_values
             if return_past_key_values_outer_encoder:
                 return past_key_values
 
         # Encode block context
-        if input_ids_context is not None:
-            decoder_hidden_states_context = self.encoder.model.embed_tokens(
-                input_ids_context
+        # TODO: Debugging: Copy outer encoder KVs as inner encoder -->
+        #  should reduce problem to AR for block size 2
+        for decoder_layer in self.decoder.model.layers:
+            layer_idx = decoder_layer.self_attn.layer_idx
+            if layer_idx not in self.decoder_layers_to_keep:
+                continue
+            past_key_values.key_cache[layer_idx] = torch.cat(
+                [
+                    past_key_values.key_cache[layer_idx],
+                    past_key_values.key_cache[layer_idx],
+                ],
+                dim=-2,
             )
-            if position_ids_context is None:
-                position_ids_context = torch.arange(
-                    input_ids_context.shape[-1], device=input_ids_context.device
-                ).unsqueeze(0)
-            position_embeddings_context = self.decoder.model.rotary_emb(
-                decoder_hidden_states_context, position_ids_context
+            past_key_values.value_cache[layer_idx] = torch.cat(
+                [
+                    past_key_values.value_cache[layer_idx],
+                    past_key_values.value_cache[layer_idx],
+                ],
+                dim=-2,
             )
-
-            for decoder_layer in self.decoder.model.layers:
-                layer_idx = decoder_layer.self_attn.layer_idx
-                if layer_idx not in self.decoder_layers_to_keep:
-                    continue
-
-                # TODO maybe adopt gradient checkpointing from transformers
-                # Cross-attend to outer encoder kvs
-                _ = decoder_layer(  # past_key_values are updated in-place
-                    hidden_states=decoder_hidden_states_context,
-                    attention_mask=attention_mask_block_context,
-                    position_ids=position_ids_context,
-                    past_key_value=past_key_values,
-                    output_attentions=False,
-                    use_cache=True,
-                    cache_position=position_ids_context[0],
-                    position_embeddings=position_embeddings_context,
-                    **flash_attn_kwargs,
-                )
-            if return_past_key_values_inner_encoder:
-                return past_key_values
+        # if input_ids_context is not None:
+        #     decoder_hidden_states_context = self.encoder.model.embed_tokens(
+        #         input_ids_context
+        #     )
+        #     if position_ids_context is None:
+        #         position_ids_context = torch.arange(
+        #             input_ids_context.shape[-1], device=input_ids_context.device
+        #         ).unsqueeze(0)
+        #     position_embeddings_context = self.decoder.model.rotary_emb(
+        #         decoder_hidden_states_context, position_ids_context
+        #     )
+        #
+        #     for decoder_layer in self.decoder.model.layers:
+        #         layer_idx = decoder_layer.self_attn.layer_idx
+        #         if layer_idx not in self.decoder_layers_to_keep:
+        #             continue
+        #
+        #         # TODO maybe adopt gradient checkpointing from transformers
+        #         # Cross-attend to outer encoder kvs
+        #         _ = decoder_layer(  # past_key_values are updated in-place
+        #             hidden_states=decoder_hidden_states_context,
+        #             attention_mask=attention_mask_block_context,
+        #             position_ids=position_ids_context,
+        #             past_key_value=past_key_values,
+        #             output_attentions=False,
+        #             use_cache=True,
+        #             cache_position=position_ids_context[0],
+        #             position_embeddings=position_embeddings_context,
+        #             **flash_attn_kwargs,
+        #         )
+        #     if return_past_key_values_inner_encoder:
+        #         return past_key_values
 
         # Run decoder with xattn to clean tokens
         decoder_hidden_states = self.encoder.model.embed_tokens(input_ids)
@@ -263,6 +272,4 @@ class LLMasEncoderDecoderAnyOrder(nn.Module):
                 ][..., :prev_cache_len, :]
         decoder_hidden_states = self.decoder.model.norm(decoder_hidden_states)
         decoded_tokens = self.decoder.lm_head(decoder_hidden_states)
-        if self.training:
-            return decoded_tokens, encoder_outputs.logits
         return decoded_tokens
