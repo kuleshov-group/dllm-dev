@@ -27,7 +27,7 @@ fi
 WATCH_FOLDER=$(realpath "../watch_folder")
 mkdir -p ${WATCH_FOLDER}
 USERNAME=$(whoami)
-NUM_VISIBLE_DEVICES=8
+NUM_VISIBLE_DEVICES=4
 RUN_DIR="/mnt/lustre/cornell/$(whoami)/runs/dllm-dev"
 mkdir -p ${RUN_DIR}
 sbatch \
@@ -37,7 +37,7 @@ sbatch \
   --get-user-env \
   --partition=cornell \
   --account=cornell \
-  --time=960:00:00 \
+  --time=100:00:00 \
   --mem=64000 \
   --nodes=1 \
   --ntasks-per-node=${NUM_VISIBLE_DEVICES} \
