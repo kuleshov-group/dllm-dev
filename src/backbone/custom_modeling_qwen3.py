@@ -1,9 +1,10 @@
-from typing import Callable, Optional, Tuple
+from typing import Callable, Optional, Tuple, Union
 
 import torch
 from torch import nn
+from torch.nn.attention.flex_attention import BlockMask, flex_attention
+from transformers import AttentionInterface
 from transformers.models.qwen3.modeling_qwen3 import (
-    ALL_ATTENTION_FUNCTIONS,
     Cache,
     FlashAttentionKwargs,
     Qwen3Attention,
@@ -29,6 +30,103 @@ def custom_apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1, q_start_idx=0):
     )
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
+
+
+@torch.compile(fullgraph=True, mode="max-autotune-no-cudagraphs")
+def compiled_flex_attention(
+    query_states, key_states, value_states, attention_mask, **kwargs
+):
+    return flex_attention(
+        query_states, key_states, value_states, block_mask=attention_mask, **kwargs
+    )
+
+
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep).
+    The hidden states go from (batch, num_key_value_heads, seqlen, head_dim) to
+    (batch, num_attention_heads, seqlen, head_dim)
+    """
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(
+        batch, num_key_value_heads, n_rep, slen, head_dim
+    )
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+
+def custom_flex_attention_forward(
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: Union[torch.Tensor, "BlockMask"],
+    scaling: Optional[float] = None,
+    softcap: Optional[float] = None,
+    head_mask: Optional[torch.Tensor] = None,
+    **kwargs,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    block_mask = None
+    causal_mask = None
+    if isinstance(attention_mask, BlockMask):
+        block_mask = attention_mask
+    else:
+        causal_mask = attention_mask
+
+    if causal_mask is not None:
+        causal_mask = causal_mask[:, :, :, : key.shape[-2]]
+
+    def score_mod(score, batch_idx, head_idx, q_idx, kv_idx):
+        if softcap is not None:
+            score = softcap * torch.tanh(score / softcap)
+        if causal_mask is not None:
+            score = score + causal_mask[batch_idx][0][q_idx][kv_idx]
+        if head_mask is not None:
+            score = score + head_mask[batch_idx][head_idx][0][0]
+        return score
+
+    enable_gqa = True
+    num_local_query_heads = query.shape[1]
+
+    # When running TP this helps:
+    if not ((num_local_query_heads & (num_local_query_heads - 1)) == 0):
+        key = repeat_kv(key, query.shape[1] // key.shape[1])
+        value = repeat_kv(value, query.shape[1] // value.shape[1])
+        enable_gqa = False
+
+    kernel_options = kwargs.get("kernel_options", None)
+    attn_output, attention_weights = compiled_flex_attention(
+        query,
+        key,
+        value,
+        score_mod=score_mod,
+        block_mask=block_mask,
+        enable_gqa=enable_gqa,
+        scale=scaling,
+        kernel_options=kernel_options,
+        # Last time checked on PyTorch == 2.5.1: Flex Attention always computes the lse
+        # regardless.
+        # For simplification, we thus always return it as no additional computations are
+        # introduced.
+        return_lse=True,
+    )
+    # lse is returned in float32
+    attention_weights = attention_weights.to(value.dtype)
+    attn_output = attn_output.transpose(1, 2).contiguous()
+
+    return attn_output, attention_weights
+
+
+class CustomAttentionInterface(AttentionInterface):
+    def __init__(self):
+        super().__init__()
+        self._local_mapping.update(
+            {"custom_flex_attention": custom_flex_attention_forward}
+        )
+
+
+CUSTOM_ALL_ATTENTION_FUNCTIONS: CustomAttentionInterface = CustomAttentionInterface()
 
 
 class CustomQwen3Attention(Qwen3Attention):
@@ -93,8 +191,9 @@ class CustomQwen3Attention(Qwen3Attention):
                     '`attn_implementation="eager"` when loading the model.'
                 )
             else:
-                attention_interface = ALL_ATTENTION_FUNCTIONS[
-                    self.config._attn_implementation
+                attention_interface = CUSTOM_ALL_ATTENTION_FUNCTIONS[
+                    "custom_flex_attention"
+                    # self.config._attn_implementation
                 ]
 
         # TODO: Ensure we're using flash_attn even though len(q) != len(k)

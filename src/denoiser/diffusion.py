@@ -37,7 +37,7 @@ def create_attn_mask(attn_mask):
     return padding
 
 
-create_block_mask_compiled = torch.compile(create_block_mask)
+# create_block_mask_compiled = torch.compile(create_block_mask)
 
 
 class DiffusionGenerationConfig(GenerationConfig):
@@ -824,51 +824,78 @@ class BD3LM(MDLM):
 
     def _create_static_mask(self) -> None:
         if self.config.backbone_is_decoder_only:
-            static_mask = self._block_mask(
-                b=None,
-                h=None,
-                q_idx=torch.arange(self.config.length * 2)[:, None],
-                kv_idx=torch.arange(self.config.length * 2)[None, :],
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
-                seq_length=self.config.length,
-            )
             if self.config.attn_backend == "flex_attention":
-                self.static_attention_mask = static_mask
+                self.static_attention_mask = create_block_mask(
+                    partial(
+                        self._block_mask,
+                        block_size=self.config.block_size,
+                        seq_length=self.config.length,
+                    ),
+                    B=None,
+                    H=None,
+                    Q_LEN=self.config.length * 2,
+                    KV_LEN=self.config.length * 2,
+                )
             else:
+                static_mask = self._block_mask(
+                    b=None,
+                    h=None,
+                    q_idx=torch.arange(self.config.length * 2)[:, None],
+                    kv_idx=torch.arange(self.config.length * 2)[None, :],
+                    block_size=self.config.block_size,
+                    seq_length=self.config.length,
+                )
                 self.register_buffer(
                     "static_attention_mask",
                     static_mask,
                 )
         else:
-            encoder_static_mask = self._encoder_block_mask(
-                b=None,
-                h=None,
-                q_idx=torch.arange(self.config.length)[:, None],
-                kv_idx=torch.arange(self.config.length)[None, :],
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
-            )
-            decoder_static_mask = self._decoder_block_mask(
-                b=None,
-                h=None,
-                q_idx=torch.arange(self.config.length)[:, None],
-                kv_idx=torch.arange(self.config.length * 2)[None, :],
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
-                seq_length=self.config.length,
-            )
-            self.register_buffer(
-                "encoder_static_attention_mask",
-                encoder_static_mask,
-            )
-            self.register_buffer(
-                "static_attention_mask",
-                decoder_static_mask,
-            )
+            if self.config.attn_backend == "flex_attention":
+                self.encoder_static_attention_mask = create_block_mask(
+                    partial(
+                        self._encoder_block_mask,
+                        block_size=self.config.block_size,
+                    ),
+                    B=None,
+                    H=None,
+                    Q_LEN=self.config.length,
+                    KV_LEN=self.config.length,
+                )
+                self.static_attention_mask = create_block_mask(
+                    partial(
+                        self._decoder_block_mask,
+                        block_size=self.config.block_size,
+                        seq_length=self.config.length,
+                    ),
+                    B=None,
+                    H=None,
+                    Q_LEN=self.config.length,
+                    KV_LEN=self.config.length * 2,
+                )
+            else:
+                encoder_static_mask = self._encoder_block_mask(
+                    b=None,
+                    h=None,
+                    q_idx=torch.arange(self.config.length)[:, None],
+                    kv_idx=torch.arange(self.config.length)[None, :],
+                    block_size=self.config.block_size,
+                )
+                decoder_static_mask = self._decoder_block_mask(
+                    b=None,
+                    h=None,
+                    q_idx=torch.arange(self.config.length)[:, None],
+                    kv_idx=torch.arange(self.config.length * 2)[None, :],
+                    block_size=self.config.block_size,
+                    seq_length=self.config.length,
+                )
+                self.register_buffer(
+                    "encoder_static_attention_mask",
+                    encoder_static_mask,
+                )
+                self.register_buffer(
+                    "static_attention_mask",
+                    decoder_static_mask,
+                )
 
     def _prepare_inputs(
         self,
@@ -983,41 +1010,44 @@ class BD3LM(MDLM):
                     decoder_attention_mask, dtype=torch.float
                 )
             elif self.config.attn_backend == "flex_attention":
-                padding_mask = create_attn_mask(attention_mask.bool())
-                dec_padding_mask = create_attn_mask(attention_mask.repeat(1, 2).bool())
-                enc_masks = [
-                    partial(
-                        self._encoder_block_mask,
-                        block_size=self.config.block_size
-                        if self.training
-                        else self.config.eval_block_size,
-                    ),
-                    padding_mask,
-                ]
-                encoder_attention_mask = create_block_mask_compiled(
-                    and_masks(*enc_masks),
-                    B=input_ids.shape[0],
-                    H=None,
-                    Q_LEN=input_ids.shape[1],
-                    KV_LEN=input_ids.shape[1],
-                )
-                dec_masks = [
-                    partial(
-                        self._decoder_block_mask,
-                        block_size=self.config.block_size
-                        if self.training
-                        else self.config.eval_block_size,
-                        seq_length=input_ids.shape[1],
-                    ),
-                    dec_padding_mask,
-                ]
-                decoder_attention_mask = create_block_mask_compiled(
-                    and_masks(*dec_masks),
-                    B=input_ids.shape[0],
-                    H=None,
-                    Q_LEN=input_ids.shape[1],
-                    KV_LEN=input_ids.shape[1] * 2,
-                )
+                encoder_attention_mask = self.encoder_static_attention_mask
+                decoder_attention_mask = self.static_attention_mask
+                # padding_mask = create_attn_mask(attention_mask.bool())
+                # dec_padding_mask = create_attn_mask(
+                #   attention_mask.repeat(1, 2).bool())
+                # enc_masks = [
+                #     partial(
+                #         self._encoder_block_mask,
+                #         block_size=self.config.block_size
+                #         if self.training
+                #         else self.config.eval_block_size,
+                #     ),
+                #     padding_mask,
+                # ]
+                # encoder_attention_mask = create_block_mask_compiled(
+                #     and_masks(*enc_masks),
+                #     B=input_ids.shape[0],
+                #     H=None,
+                #     Q_LEN=input_ids.shape[1],
+                #     KV_LEN=input_ids.shape[1],
+                # )
+                # dec_masks = [
+                #     partial(
+                #         self._decoder_block_mask,
+                #         block_size=self.config.block_size
+                #         if self.training
+                #         else self.config.eval_block_size,
+                #         seq_length=input_ids.shape[1],
+                #     ),
+                #     dec_padding_mask,
+                # ]
+                # decoder_attention_mask = create_block_mask_compiled(
+                #     and_masks(*dec_masks),
+                #     B=input_ids.shape[0],
+                #     H=None,
+                #     Q_LEN=input_ids.shape[1],
+                #     KV_LEN=input_ids.shape[1] * 2,
+                # )
             else:
                 raise ValueError("Unknown backbone backend")
             return DenoiserInput(
