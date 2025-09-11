@@ -155,7 +155,7 @@ def load_model_from_ckpt_dir_path(
     load_ema_weights: bool = False,
     verbose: bool = False,
     device: torch.device | str = torch.device("cpu"),
-    **kwargs,
+    **model_init_overrides,
 ) -> Denoiser:
     """Load a model from a checkpoint path (and file).
 
@@ -174,7 +174,7 @@ def load_model_from_ckpt_dir_path(
         Denoiser: The loaded denoiser model.
     """
 
-    def _replace_in_state_dict_if_present(
+    def _replace_prefix_in_state_dict_if_present(
         sd: dict[str, Any],
         prefix: str,
         replacement: str = "",
@@ -207,8 +207,22 @@ def load_model_from_ckpt_dir_path(
                     newkey = key.replace(prefix, replacement)
                     sd._metadata[newkey] = sd._metadata.pop(key)
 
+    def _apply_model_init_overrides(
+        cfg: dict[str, Any],
+        overrides: dict[str, Any],
+    ) -> dict[str, Any]:
+        for k, v in overrides.items():
+            if isinstance(v, dict):
+                cfg[k] = _apply_model_init_overrides(cfg[k], v)
+            else:
+                if verbose:
+                    print(f"Overriding {k}: {cfg['k']} --> {v}")
+                cfg[k] = v
+        return cfg
+
     with open(os.path.join(path_to_ckpt_dir, "config.yaml"), "rb") as f:
         config = yaml.safe_load(f)
+    config["model"] = _apply_model_init_overrides(config["model"], model_init_overrides)
     config = OmegaConf.create(config)
 
     model = hydra.utils.instantiate(
@@ -255,7 +269,9 @@ def load_model_from_ckpt_dir_path(
             raise ValueError("EMA weights not found in checkpoint.")
     else:
         state_dict = ckpt["state"]["model"]
-    _replace_in_state_dict_if_present(state_dict, "_orig_mod.")  # for compiled models
+    _replace_prefix_in_state_dict_if_present(
+        state_dict, "_orig_mod."
+    )  # for compiled models
     torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, "model.")
     model.load_state_dict(state_dict, strict=False)
 

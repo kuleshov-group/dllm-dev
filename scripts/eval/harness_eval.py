@@ -85,6 +85,10 @@ class LMEvalHarnessModel(LM):
                 load_ema_weights=load_ema_weights,
                 ckpt_file=ckpt_file,
                 device=self.device,
+                config={
+                    "attn_backend": "eager",
+                    "backbone_config": {"attn_backend": "eager"},
+                },
             )
         else:
             try:
@@ -154,6 +158,7 @@ class LMEvalHarnessModel(LM):
         res_for_json = []
         correct, total = 0, 0
         tputs = []
+        nfes = []
         for i, elem in tqdm(
             enumerate(ds), desc="Generating", total=len(ds), disable=(self.rank != 0)
         ):
@@ -181,12 +186,14 @@ class LMEvalHarnessModel(LM):
                 start_event.record()
             else:
                 start_event, end_event = None, None
-            sample = self.model.generate(
+            sample, nfe = self.model.generate(
                 inputs=elem["prefix"][None, ...].to(self.device),
                 disable_pbar=(self.rank != 0),
                 # tokenizer=self.tokenizer,  # Uncomment for debugging
+                return_nfes=True,
                 **self.gen_kwargs,
             )
+            nfes.append(nfe)
             if self.rank == 0 and i >= self.throughput_warmup:
                 end_event.record()
                 torch.cuda.synchronize()
@@ -225,6 +232,7 @@ class LMEvalHarnessModel(LM):
             # torch.cuda.empty_cache()
             if self.rank == 0:
                 print(f"\nAccuracy: {correct}/{total} = {correct / total:.2%}\n")
+                print(f"NFEs: {np.mean(nfes):0.2f} +/- {np.std(nfes):0.2f}\n")
                 if i >= self.throughput_warmup:
                     print(
                         f"Thput (tok/s): {np.mean(tputs):0.2f} +/- {np.std(tputs):0.2f}"

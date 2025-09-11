@@ -30,7 +30,7 @@ train_dataloader:
 eval_dataloader:
   _target_: torch.utils.data.DataLoader
   # Note: batch_size is **per device** (if grad_accum is used, reduce size to avoid OOM)
-  batch_size: ${eval:${div_up:${div_up:${training.global_batch_size}, ${get_world_size:}}, ${training.grad_accum}}*2}
+  batch_size: ${eval:${div_up:${div_up:${training.global_batch_size}, ${get_world_size:}}, ${training.grad_accum}}*1}
   num_workers: ${train_dataloader.num_workers}
   pin_memory: ${train_dataloader.pin_memory}
 

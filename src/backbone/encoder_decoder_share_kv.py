@@ -176,7 +176,7 @@ class LLMasEncoderDecoderShareKV(nn.Module):
     def forward(
         self,
         # Decoder inputs
-        input_ids: torch.LongTensor,
+        input_ids: torch.LongTensor | torch.FloatTensor,
         attention_mask: torch.FloatTensor | BlockMask | None = None,
         position_ids: torch.LongTensor | None = None,
         cache_position: torch.LongTensor | None = None,
@@ -214,7 +214,12 @@ class LLMasEncoderDecoderShareKV(nn.Module):
                 )
 
         # Run decoder with xattn to clean token hidden states
-        decoder_hidden_states = self.encoder.model.embed_tokens(input_ids)
+        if input_ids.ndim == 2:  # indices (B, L)
+            decoder_hidden_states = self.encoder.model.embed_tokens(input_ids)
+        else:  # one-hots (B, L, V)
+            decoder_hidden_states = torch.nn.functional.linear(
+                input_ids.to(torch.float), self.encoder.model.embed_tokens.weight.T
+            )
         if cache_position is None:
             if position_ids is not None:
                 cache_position = position_ids[0]

@@ -193,7 +193,7 @@ class LLMasEncoderDecoder(nn.Module):
     def forward(
         self,
         # Decoder inputs
-        input_ids: torch.LongTensor,
+        input_ids: torch.LongTensor | torch.FloatTensor,
         attention_mask: torch.FloatTensor | BlockMask | None = None,
         position_ids: torch.LongTensor | None = None,
         cache_position: torch.LongTensor | None = None,
@@ -241,9 +241,15 @@ class LLMasEncoderDecoder(nn.Module):
             encoder_last_hidden_state = encoder_output.last_hidden_state
 
         # Run decoder with xattn to clean token hidden states
+        if input_ids.ndim == 2:  # indices (B, L)
+            decoder_hidden_states = self.encoder.model.embed_tokens(input_ids)
+        else:  # one-hots (B, L, V)
+            decoder_hidden_states = torch.nn.functional.linear(
+                input_ids.to(torch.float), self.encoder.model.embed_tokens.weight.T
+            )
         if encoder_last_hidden_state is None:  # No new encoder tokens
             q_start_idx = 0
-            decoder_hidden_states = self.encoder.model.embed_tokens(input_ids)
+
             if cache_position is None:
                 if position_ids is not None:
                     cache_position = position_ids[0]
@@ -265,7 +271,6 @@ class LLMasEncoderDecoder(nn.Module):
             )
         else:
             q_start_idx = encoder_last_hidden_state.shape[1]
-            decoder_hidden_states = self.encoder.model.embed_tokens(input_ids)
             decoder_hidden_states = torch.cat(
                 [
                     encoder_last_hidden_state,

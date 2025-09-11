@@ -42,7 +42,7 @@ from src.noise_schedule.noise_schedules import (  # noqa: F401
 class DenoiserInput(OrderedDict):
     """Input to the denoiser model."""
 
-    xt: torch.LongTensor  # (B, L) token_ids
+    xt: Union[torch.LongTensor, torch.FloatTensor]  # (B, L) token_ids
     x0: Optional[torch.LongTensor] = None  # (B, L) token_ids (not used in gen.)
     attention_mask: Optional[torch.FloatTensor] = None
     past_key_values: Optional[Union[torch.FloatTensor, Cache]] = None

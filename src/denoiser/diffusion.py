@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any, Dict, Literal, Tuple, Union
+from typing import Any, Callable, Dict, Literal, Tuple, Union
 
 import torch
 from tqdm.auto import tqdm
@@ -419,6 +419,47 @@ class D3PM(Denoiser):
             device=device,
         )[:-1]
 
+    def _compute_gathered_log_probs_from_one_hots(
+        self,
+        one_hots: torch.LongTensor,
+        gather_indices: torch.LongTensor,
+        denoiser_inputs: DenoiserInput,
+        **kwargs,
+    ) -> torch.FloatTensor:
+        """Computes log probability of a given sequence.
+
+        Args:
+            one_hots (torch.LongTensor): inputs to denoiser backbone as one-hot
+                encodings (B, L, V).
+            gather_indices (torch.LongTensor): proposal sequence input_ids, i.e., the
+                indices to use in torch.gather (B, L).
+        """
+        one_hot_denoiser_inputs = DenoiserInput(
+            xt=one_hots,
+            attention_mask=denoiser_inputs.attention_mask,
+            context_mask=denoiser_inputs.context_mask,
+            past_key_values=denoiser_inputs.past_key_values,
+            backbone_kwargs=denoiser_inputs.backbone_kwargs,
+        )
+        backbone_output = self._backbone_forward(
+            one_hot_denoiser_inputs,
+            fix_cache_length=True,
+            **kwargs,
+        )
+        backbone_output = {k: v for k, v in backbone_output.items()}
+        logits = backbone_output.pop("logits")
+        log_x_theta = self._forward(logits, denoiser_inputs, **kwargs)
+        return log_x_theta.gather(-1, gather_indices[..., None]).squeeze(dim=-1)
+
+    @staticmethod
+    @torch.compile
+    def _jvp_wrapper_for_vmap(
+        v: torch.FloatTensor,
+        func: Callable[[torch.Tensor], torch.Tensor],
+        x: torch.FloatTensor,
+    ) -> torch.FloatTensor:
+        return torch.func.jvp(func=func, primals=(x,), tangents=(v,))[1]
+
     def _generate_unconditional(  # TODO: add CBG and CFG generation
         self,
         generation_config: DiffusionGenerationConfig,
@@ -457,7 +498,8 @@ class D3PM(Denoiser):
             x_theta = log_x_theta.exp()
         else:
             x_theta = model_output_cache["x_theta"]
-        model_output_cache = {"x_theta": x_theta}
+            log_x_theta = model_output_cache["log_x_theta"]
+        model_output_cache = {"x_theta": x_theta, "log_x_theta": log_x_theta}
         prob_check_denom = denoiser_inputs.xt.numel() - self.config.shift_logits
         if generation_config.sampling_strategy == "posterior":
             q_xs = self._compute_posterior(
@@ -469,9 +511,8 @@ class D3PM(Denoiser):
             )
             assert q_xs.isnan().sum().item() == 0, "NaN found in the posterior."
             xs = self._sample_categorical(q_xs, generation_config.do_sample)
-            xs_probs = q_xs.gather(-1, xs[..., None]).squeeze(dim=-1)
             output = torch.where(
-                (denoiser_inputs.xt != self.mask_token_id).bool(),
+                (denoiser_inputs.xt != self.mask_token_id).bool(),  # type: ignore
                 denoiser_inputs.xt,
                 xs,
             )
@@ -479,12 +520,12 @@ class D3PM(Denoiser):
             assert self.config.diffusion_type == "absorbing", (
                 "predict_and_noise decoding strategy only supports absorbing diffusion."
             )
-            # assert (
-            #     abs((x_theta.sum() / prob_check_denom).item() - 1.0) < 1e-6
-            # ), "Denoising output probabilities not summing to 1."
-            # assert x_theta.isnan().sum().item() == 0, (
-            #     "NaN found in the denoising output."
-            # )
+            assert abs((x_theta.sum() / prob_check_denom).item() - 1.0) < 1e-6, (
+                "Denoising output probabilities not summing to 1."
+            )
+            assert x_theta.isnan().sum().item() == 0, (
+                "NaN found in the denoising output."
+            )
 
             # Predict
             xs = self._sample_categorical(x_theta, generation_config.do_sample)
@@ -502,97 +543,202 @@ class D3PM(Denoiser):
                 or generation_config.coherence_based_noising
             ):
                 if generation_config.confidence_based_noising:
-                    conf = x_theta.gather(-1, xs[..., None]).squeeze(-1)
+                    conf = xs_probs
                 elif generation_config.confidence_margin_based_noising:
                     top2 = torch.topk(x_theta, k=2, dim=-1).values  # shape: (B, L, 2)
                     conf = (top2[..., 0] - top2[..., 1]).abs()
                 else:
-                    batch_size, seq_len = denoiser_inputs.xt.shape
-                    hamm_one_proposal = denoiser_inputs.xt[:, None, :].repeat(
-                        1, seq_len, 1
+                    b_idx = torch.arange(x_theta.shape[0], device=x_theta.device)
+                    # proposal = denoiser_inputs.xt.clone()
+                    # candidate_probs = xs_probs.clone()
+                    proposal = torch.where(
+                        xs_probs >= generation_config.confidence_threshold,
+                        xs,
+                        denoiser_inputs.xt,
                     )
-                    hamm_one_proposal[
-                        torch.arange(batch_size).unsqueeze(1),
-                        torch.arange(seq_len),
-                        torch.arange(seq_len),
-                    ] = xs
-                    # og_weighted_log_probs = torch.gather(
-                    #     log_x_theta, -1, xs[..., None]
-                    # ).squeeze(dim=-1) * xs_probs
-                    og_log_probs = log_x_theta.gather(-1, xs[..., None]).squeeze(dim=-1)
-                    cps_true = torch.zeros(
-                        (batch_size, seq_len, seq_len), device=denoiser_inputs.xt.device
+                    candidate_probs = torch.where(
+                        xs_probs >= generation_config.confidence_threshold,
+                        1.0,
+                        xs_probs,
                     )
-                    # conf = torch.zeros_like(xs, dtype=torch.float)
-                    for i in range(seq_len):
-                        if denoiser_inputs.xt[0, i] != self.mask_token_id:
-                            continue
-                        z_hat_denoiser_inputs = DenoiserInput(
-                            xt=hamm_one_proposal[:, i],
+                    xs_log_probs = log_x_theta.gather(-1, xs[..., None]).squeeze(dim=-1)
+                    candidate_mask = proposal != self.mask_token_id
+                    # TODO: only works for batch size 1
+                    for _ in range((proposal == self.mask_token_id).sum().item()):
+                        threshold, pivot = candidate_probs.min(dim=-1)
+                        candidate_mask = xs_probs >= threshold
+                        proposal[b_idx, pivot] = xs[b_idx, pivot]
+                        proposal_denoiser_inputs = DenoiserInput(
+                            xt=proposal,  # type: ignore
                             attention_mask=denoiser_inputs.attention_mask,
                             context_mask=denoiser_inputs.context_mask,
                             past_key_values=denoiser_inputs.past_key_values,
                             backbone_kwargs=denoiser_inputs.backbone_kwargs,
                         )
-                        backbone_output = self._backbone_forward(
-                            z_hat_denoiser_inputs,
-                            fix_cache_length=True,
+                        proposal_log_x_theta = self._forward(
+                            self._backbone_forward(
+                                proposal_denoiser_inputs,
+                                fix_cache_length=True,
+                                **kwargs,
+                            )["logits"],
+                            proposal_denoiser_inputs,
                             **kwargs,
                         )
-                        backbone_output = {k: v for k, v in backbone_output.items()}
-                        logits = backbone_output.pop("logits")
-                        log_x_theta = self._forward(
-                            logits, z_hat_denoiser_inputs, **kwargs
-                        )
-                        # hamm_one_weighted_log_probs = log_x_theta.gather(
-                        #     -1, xs[..., None]
-                        # ).squeeze(dim=-1) * xs_probs
-                        # cps_true[:, :, i] = (
-                        #     hamm_one_weighted_log_probs - og_weighted_log_probs
-                        # )
-                        # conf[:, i] = (
-                        #     (hamm_one_weighted_log_probs - og_weighted_log_probs).sum(
-                        #         dim=-1
-                        #     )
-                        #     + og_weighted_log_probs[:, i]
-                        #     - hamm_one_weighted_log_probs[:, i]
-                        # )
-                        hamm_one_log_probs = log_x_theta.gather(
+                        proposal_xs_log_probs = proposal_log_x_theta.gather(
                             -1, xs[..., None]
                         ).squeeze(dim=-1)
-                        cps_true[:, :, i] = hamm_one_log_probs - og_log_probs
-                    # cps_true.diagonal(dim1=-2, dim2=-1).zero_()
-                    cps_true_sign = cps_true > 0.0
-                    mutual_coherence = cps_true_sign & cps_true_sign.transpose(1, 2)
-                    scores = torch.where(
-                        (denoiser_inputs.xt == self.mask_token_id).bool(),
-                        mutual_coherence.sum(dim=2),
-                        -1,
-                    )
-                    b_idx = torch.arange(batch_size, device=denoiser_inputs.xt.device)
-                    parallel_group = torch.zeros_like(
-                        denoiser_inputs.xt, dtype=torch.bool
+                        check = (
+                            (
+                                (
+                                    proposal_xs_log_probs[candidate_mask]
+                                    - xs_log_probs[candidate_mask]
+                                )
+                                > -1e-4
+                            )
+                            .all()
+                            .item()
+                        )
+                        if check:
+                            break
+                        candidate_probs[b_idx, pivot] = 1.0
+                        proposal[b_idx, pivot] = denoiser_inputs.xt[b_idx, pivot]
+                    output = torch.where(
+                        candidate_mask,
+                        xs,
+                        denoiser_inputs.xt,
                     )
 
+                    # batch_size, seq_len = denoiser_inputs.xt.shape
+                    # hamm_one_proposal = denoiser_inputs.xt[:, None, :].repeat(
+                    #     1, seq_len, 1
+                    # )
+                    # hamm_one_proposal[
+                    #     torch.arange(batch_size).unsqueeze(1),
+                    #     torch.arange(seq_len),
+                    #     torch.arange(seq_len),
+                    # ] = xs
+                    # xt_oh = torch.nn.functional.one_hot(
+                    #     denoiser_inputs.xt, num_classes=x_theta.shape[-1]
+                    # ).float().contiguous()
+                    # hamm_one_proposal_oh = torch.nn.functional.one_hot(
+                    #     hamm_one_proposal, num_classes=x_theta.shape[-1]
+                    # )
+                    # og_log_probs = log_x_theta.gather(
+                    #   -1, xs[..., None]).squeeze(dim=-1)
+                    # cps_true = torch.zeros(
+                    #     (batch_size, seq_len, seq_len),
+                    #     device=denoiser_inputs.xt.device
+                    # )
+                    # cps_approx = torch.zeros(
+                    #     (batch_size, seq_len, seq_len),
+                    #     device=denoiser_inputs.xt.device
+                    # )
+                    # for i in range(seq_len):
+                    #     if denoiser_inputs.xt[0, i] != self.mask_token_id:
+                    #         continue
+                    #     z_hat_denoiser_inputs = DenoiserInput(
+                    #         xt=hamm_one_proposal[:, i],
+                    #         attention_mask=denoiser_inputs.attention_mask,
+                    #         context_mask=denoiser_inputs.context_mask,
+                    #         past_key_values=denoiser_inputs.past_key_values,
+                    #         backbone_kwargs=denoiser_inputs.backbone_kwargs,
+                    #     )
+                    #     backbone_output = self._backbone_forward(
+                    #         z_hat_denoiser_inputs,
+                    #         fix_cache_length=True,
+                    #         **kwargs,
+                    #     )
+                    #     backbone_output = {k: v for k, v in backbone_output.items()}
+                    #     logits = backbone_output.pop("logits")
+                    #     log_x_theta = self._forward(
+                    #         logits, z_hat_denoiser_inputs, **kwargs
+                    #     )
+                    #     hamm_one_log_probs = log_x_theta.gather(
+                    #         -1, xs[..., None]
+                    #     ).squeeze(dim=-1)
+                    #     cps_true[..., i] = hamm_one_log_probs - og_log_probs
+                    #     with torch.enable_grad():
+                    #         xt_oh.requires_grad_(True)
+                    #         cps_approx[..., i] = torch.autograd.functional.jvp(
+                    #             func=partial(  # type: ignore
+                    #                 self._compute_gathered_log_probs_from_one_hots,
+                    #                     gather_indices=xs,
+                    #                     denoiser_inputs=denoiser_inputs,
+                    #                     **kwargs,
+                    #             ),
+                    #             inputs=xt_oh,
+                    #             v=hamm_one_proposal_oh[:, i, ...] - xt_oh
+                    #         )[1]
+                    # directions = (
+                    #     torch.nn.functional.one_hot(
+                    #         hamm_one_proposal, num_classes=x_theta.shape[-1]
+                    #     ).float()
+                    #     - xt_oh.unsqueeze(1)
+                    # ).reshape(seq_len, batch_size, seq_len, -1).contiguous()
+                    # with (torch.enable_grad()):
+                    #     xt_oh.requires_grad_(True)
+                    #     cps_approx = torch.func.vmap(
+                    #         partial(
+                    #             self._jvp_wrapper_for_vmap,
+                    #             func=partial(
+                    #                 self._compute_gathered_log_probs_from_one_hots,
+                    #                 gather_indices=xs,
+                    #                 denoiser_inputs=denoiser_inputs,
+                    #             ),
+                    #             x=xt_oh
+                    #         )
+                    #     )(directions).permute(1, 2, 0)
+                    # cps_true.diagonal(dim1=-2, dim2=-1).fill_(1.)
+                    # cps_true_sign = cps_true > 0.0
+                    # cps_approx.diagonal(dim1=-2, dim2=-1).fill_(1.)
+                    # cps_approx_sign = cps_approx > 0.0
+                    # mutual_coherence = cps_true_sign & cps_true_sign.transpose(1, 2)
+                    # mutual_coherence_approx = cps_approx_sign & \
+                    #          cps_approx_sign.transpose(1, 2)
+                    # scores = torch.where(
+                    #     (denoiser_inputs.xt == self.mask_token_id).bool(),
+                    # mutual_coherence.sum(dim=2),
+                    #     mutual_coherence_approx.sum(dim=2),
+                    #     -1,
+                    # )
+                    # b_idx = torch.arange(batch_size, device=denoiser_inputs.xt.device)
+                    # parallel_group = torch.zeros_like(
+                    #     denoiser_inputs.xt, dtype=torch.bool
+                    # )
+
                     # Choose node with most neighbors as the pivot
-                    pivot_idx = scores.argmax(dim=-1)
-                    parallel_group[b_idx, pivot_idx] = True
-                    scores[b_idx, pivot_idx] = -1
-                    # ignore pivot's non-neighbors
-                    scores[~mutual_coherence[b_idx, :, pivot_idx]] = -1
-                    for _ in range(seq_len - 1):
-                        if scores.max().item() == -1:
-                            break
-                        next_idx = scores.argmax(dim=-1)
-                        scores[b_idx, next_idx] = -1
-                        # Check:
-                        #   i ∈ clique implies i in neighbors(next_idx)
-                        #   equivalent to i ∉ clique OR i in neighbors(next_idx)
-                        parallel_group[b_idx, next_idx] = (
-                            ~parallel_group | mutual_coherence[b_idx, :, next_idx]
-                        ).all(dim=-1)
-                    output = denoiser_inputs.xt.clone()
-                    output[parallel_group] = xs[parallel_group]
+                    # pivot_idx = torch.where(
+                    #     scores != scores.max(dim=-1, keepdim=True),
+                    #     -1,
+                    #     xs_probs  # break ties using token probs
+                    # ).argmax(dim=-1)
+                    # pivot_idx = scores.argmax(dim=-1)
+                    # parallel_group[b_idx, pivot_idx] = True
+                    # scores[b_idx, pivot_idx] = -1
+                    # Ignore pivot's non-neighbors
+                    # scores[~mutual_coherence[b_idx, :, pivot_idx]] = -1
+                    # scores[~mutual_coherence_approx[b_idx, :, pivot_idx]] = -1
+                    # for _ in range(seq_len - 1):
+                    #     if scores.max().item() == -1:
+                    #         break
+                    # next_idx = torch.where(
+                    #     scores != scores.max(dim=-1, keepdim=True),
+                    #     -1,
+                    #     xs_probs
+                    # ).argmax(dim=-1)
+                    # next_idx = scores.argmax(dim=-1)
+                    # scores[b_idx, next_idx] = -1
+                    # # Checking:      i ∈ clique → i ∈ neighbors(next_idx)
+                    # # equivalent to: i ∉ clique ∨ i ∈ neighbors(next_idx)
+                    # parallel_group[b_idx, next_idx] = (
+                    # ~parallel_group | mutual_coherence[b_idx, :, next_idx]
+                    #     ~parallel_group | mutual_coherence_approx[b_idx, :, next_idx]
+                    # ).all(dim=-1)
+                    # output = denoiser_inputs.xt.clone()
+                    # output[parallel_group] = xs[parallel_group]
+                    # output = torch.where(
+                    #     xs_probs >= generation_config.confidence_threshold, xs, output
+                    # )
                     return output, model_output_cache, cache  # type: ignore
                 if self.config.shift_logits:
                     # noinspection LongLine
@@ -611,7 +757,7 @@ class D3PM(Denoiser):
                 noise_indices = conf.argsort(dim=-1)[..., :num_noise_indices]
             else:
                 # TODO: implement random noise indices selection
-                raise NotImplementedError
+                raise NotImplementedError("Random indices selection not implemented.")
             output[..., noise_indices] = self.mask_token_id
             output = torch.where(
                 xs_probs >= generation_config.confidence_threshold, xs, output
@@ -636,6 +782,7 @@ class D3PM(Denoiser):
         device: str | None = None,
         tokenizer: PreTrainedTokenizer | None = None,
         disable_pbar: bool = False,
+        return_nfes: bool = False,
         **kwargs: Any,
     ) -> torch.LongTensor:
         # Setup sampling variables
@@ -815,6 +962,8 @@ class D3PM(Denoiser):
                     inputs=xt,
                     cache=cache,
                 )
+        if return_nfes:
+            return accumulated_samples, total_NFEs
         return accumulated_samples  # type: ignore
 
 

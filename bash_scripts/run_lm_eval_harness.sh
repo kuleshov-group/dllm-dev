@@ -49,9 +49,9 @@ for N in 14; do
   SAMPLING_STRATEGY="predict_and_noise"  # "predict_and_noise" or "posterior"
   T=8 #${BLOCK_SIZE}
   FIRST_HITTING=true
-  CONFIDENCE_BASED_NOISING=true
+  CONFIDENCE_BASED_NOISING=false
   CONFIDENCE_MARGIN_BASED_NOISING=false
-  COHERENCE_BASED_NOISING=false
+  COHERENCE_BASED_NOISING=true
   CONFIDENCE_THRESHOLD=1e6
   CKPT="best"
 

@@ -32,6 +32,7 @@ fi
 export NUM_VISIBLE_DEVICES
 # TODO: Remove rebuttal
 RUN_DIR="/share/kuleshov/$(whoami)/runs/dllm-dev/cbd"
+#RUN_DIR="/share/kuleshov/$(whoami)/runs/dllm-dev/rebuttal"
 DATA_DIR="/share/kuleshov/ma2238/dllm-data"
 mkdir -p ${RUN_DIR}
 mkdir -p ${DATA_DIR}
