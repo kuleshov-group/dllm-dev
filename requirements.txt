@@ -1,3 +1,4 @@
+torch==2.5.1
 accelerate
 datasets
 einops
@@ -6,7 +7,8 @@ hydra-core
 ipdb
 lm-eval
 magic-wormhole
-mosaicml
+# Latest mosaic version compatible with torch 2.5.1 is 0.30.0
+mosaicml==0.30.0
 mosaicml-streaming
 pre-commit
 sentencepiece
