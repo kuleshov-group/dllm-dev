@@ -63,20 +63,12 @@ class LossAndNllOutput(OrderedDict):
     other_loss_terms: dict = field(default_factory=dict)
 
 
-@attr.s(auto_attribs=True, init=False)
 class DenoiserOutput(OrderedDict):
     """Output of the denoiser model."""
 
-    denoiser_output: torch.FloatTensor
-    logits: Optional[torch.FloatTensor] = None
-    tokens_mask: Optional[torch.FloatTensor] = None  # Which tokens contribute to loss
-    past_key_values: Optional[Cache] = None
-    loss: Optional[torch.FloatTensor] = None
-    nlls: Optional[torch.FloatTensor] = None
-
     def __init__(
         self,
-        denoiser_output: torch.FloatTensor,
+        denoiser_output: Optional[torch.FloatTensor] = None,
         logits: Optional[torch.FloatTensor] = None,
         tokens_mask: Optional[torch.FloatTensor] = None,
         past_key_values: Optional[Cache] = None,
@@ -85,16 +77,34 @@ class DenoiserOutput(OrderedDict):
         **output_kwargs: Any,
     ):
         super().__init__()
-        self["denoiser_output"] = denoiser_output
-        self["logits"] = logits
-        self["tokens_mask"] = tokens_mask
-        self["past_key_values"] = past_key_values
-        self["loss"] = loss
-        self["nlls"] = nlls
+        if denoiser_output is not None:
+            self["denoiser_output"] = denoiser_output
+        if logits is not None:
+            self["logits"] = logits
+        if tokens_mask is not None:
+            self["tokens_mask"] = tokens_mask
+        if past_key_values is not None:
+            self["past_key_values"] = past_key_values
+        if loss is not None:
+            self["loss"] = loss
+        if nlls is not None:
+            self["nlls"] = nlls
         for k, v in output_kwargs.items():
             self[k] = v
+        # Sync attributes with dictionary keys
         for k, v in self.items():
             setattr(self, k, v)
+
+    def __setitem__(self, key: str, value: Any) -> None:
+        """Override to sync dictionary assignment with attribute access."""
+        super().__setitem__(key, value)
+        setattr(self, key, value)
+
+    def __getattr__(self, name: str) -> Any:
+        """Allow attribute access to dictionary keys."""
+        if name in self:
+            return self[name]
+        raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
 
 
 class DenoiserConfig(PretrainedConfig):

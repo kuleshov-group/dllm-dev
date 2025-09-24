@@ -1,11 +1,7 @@
+# See:
+# - https://github.com/mosaicml/composer/blob/v0.32.1/composer/utils/parallelism.py#L14
+# - https://docs.mosaicml.com/projects/composer/en/stable/notes/distributed_training.html#fullyshardeddataparallel-fsdp
+# - https://github.com/mosaicml/composer/blob/v0.32.1/composer/distributed/mosaic_parallelism.py#L25-L31
 fsdp:
   sharding_strategy: "FULL_SHARD"
-  cpu_offload: null
-  mixed_precision:
-    param_dtype: ${composer.trainer.precision}
-    reduce_dtype: ${composer.trainer.precision}
-    buffer_dtype: ${composer.trainer.precision}
-  backward_prefetch: "BACKWARD_POST"
-  activation_checkpointing: false
-  activation_cpu_offload: false
   verbose: true
