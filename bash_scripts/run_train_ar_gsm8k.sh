@@ -7,8 +7,6 @@ source setup_env.sh
 
 # Model arch
 N_LAYERS=28
-TOP_LAYERS=false
-REINIT_MODEL=false
 
 # Hyperparameters
 LR=1e-5
@@ -52,7 +50,7 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   model=ar \
   model/backbone@model.config.backbone_config=automodel_for_causal_lm \
   model.config.length=768 \
-  model.config.backbone_config.reinit_model=true \
+  model.config.backbone_config.reinit_model=false \
   model.config.backbone_config.num_layers=${N_LAYERS} \
   model.config.backbone_config.keep_top_layers=false \
   training.global_batch_size=${BATCH_SIZE} \
