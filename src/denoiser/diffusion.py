@@ -145,7 +145,7 @@ class D3PMConfig(DenoiserConfig):
         self,
         keep_clean_bos: Optional[bool] = None,  # Whether to enforce un-noised BOS token
         T: int = 1000,
-        diffusion_type: Literal["absorbing", "uniform"] = "absorbing",
+        diffusion_type: Literal["absorbing"] = "absorbing",
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -198,12 +198,6 @@ class D3PM(Denoiser):
             xt = torch.where(
                 (move_indices * (1 - context_mask)).bool(), self.mask_token_id, x0
             )
-            if self.config.keep_clean_bos:
-                xt[..., 0] = x0[..., 0]
-            return xt  # type: ignore
-        if self.diffusion_type == "uniform":
-            xt = torch.randint(0, self.vocab_size, x0.shape, device=x0.device)
-            xt = torch.where(context_mask.bool(), x0, xt)
             if self.config.keep_clean_bos:
                 xt[..., 0] = x0[..., 0]
             return xt  # type: ignore
@@ -334,18 +328,11 @@ class D3PM(Denoiser):
             return self.mask_token_id * torch.ones(
                 (batch_size, length), dtype=torch.int64, device=device
             )
-        if self.diffusion_type == "uniform":
-            return torch.randint(
-                0,
-                self.vocab_size,
-                (batch_size, length),
-                device=device,
-                dtype=torch.int64,
-            )
         raise NotImplementedError(
             f"Diffusion type '{self.diffusion_type}' not implemented."
         )
 
+    # noinspection PyUnusedLocal
     def _compute_posterior(
         self,
         x: Union[torch.FloatTensor, torch.LongTensor],
@@ -369,20 +356,6 @@ class D3PM(Denoiser):
             q_xs /= 1 - alpha_t
             return q_xs  # type: ignore
 
-        alpha_ts = alpha_t / alpha_s
-        d_alpha = alpha_s - alpha_t
-        xt_one_hot = torch.nn.functional.one_hot(x, self.vocab_size)
-        limiting_distribution = torch.ones_like(xt_one_hot) / self.vocab_size
-        if self.diffusion_type == "uniform":
-            return (
-                alpha_t * self.vocab_size * x * xt_one_hot
-                + (alpha_ts - alpha_t) * xt_one_hot
-                + d_alpha * x
-                + (1 - alpha_ts) * (1 - alpha_s) * limiting_distribution
-            ) / (
-                alpha_t * self.vocab_size * torch.gather(x, -1, xt[..., None])
-                + (1 - alpha_t)
-            )
         raise NotImplementedError(
             f"Diffusion type {self.diffusion_type} not implemented."
         )
