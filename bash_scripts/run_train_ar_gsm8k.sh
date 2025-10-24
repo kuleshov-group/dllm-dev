@@ -20,15 +20,8 @@ PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-1.7B-Base
 NUM_SHOT=0
 
 TAG="ar"
-if [ "${TOP_LAYERS}" == "true" ]; then
-  LAYERS="TOPlayers${N_LAYERS}"
-else
-  LAYERS="layers${N_LAYERS}"
-fi
+LAYERS="layers${N_LAYERS}"
 RUN_NAME=gsm8k-${NUM_SHOT}shot_lr${LR}_bsz${BATCH_SIZE}_warm${WARMUP_DURATION}_alphaf${ALPHA_F}_max-dur${MAX_DURATION}_${PRECISION}_${LAYERS}_${TAG}
-if [ "${REINIT_MODEL}" == "true" ]; then
-  RUN_NAME="${RUN_NAME}_reinit"
-fi
 
 MICRO_BATCH_SIZE=1
 NUM_WORKERS=0
