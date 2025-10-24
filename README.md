@@ -1,19 +1,33 @@
-# E2D2: Encoder-Decoder Diffusion Language Models for Efficient Training and Inference
+# dllm-dev
+Internal repo for iteration on Diffusion LLMs
 
-[![deploy](https://img.shields.io/badge/Paper_📃-green)](https://github.com/kuleshov-group/e2d2)
-[![deploy](https://img.shields.io/badge/Blog_📝%20%20-8A2BE2)](https://m-arriola.com/e2d2)
-[![deploy](https://img.shields.io/badge/HuggingFace_🤗%20-E2D2%20-orange)](https://huggingface.co/collections/kuleshov-group/e2d2)
-
-
-This repository contains code and scripts for reproducing experimental results from our
-work.
 
 ## 0. Setup
 
+### Provision hardware
+
+If necessary, provision accelerator-enabled VMs with [SkyPilot](https://docs.skypilot.co/en/latest/).
+
+For Lambda, e.g., this is all it takes to create a single A100 node for development:
+
+```bash
+pip install skypilot[lambda]
+sky launch --cluster dllm --gpus A100
+ssh dllm # sky creates ssh configs for you
+```
+
+SkyPilot can also provision clusters, setup environments, manage task execution and some
+other useful stuff.
+See [docs/skypilot.md](docs/skypilot.md) for more details.
+
 ### Setup environment
 
-Install conda:
+Install mamba or conda (mamba is far faster):
+
 ```bash
+# For mamba: https://mamba.readthedocs.io/en/latest/installation/micromamba-installation.html#umamba-install
+"${SHELL}" <(curl -L micro.mamba.pm/install.sh)
+
 # For conda: https://docs.conda.io/projects/conda/en/stable/user-guide/install/linux.html
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O miniconda.sh && \
 bash miniconda.sh -b -p /opt/conda
@@ -22,13 +36,14 @@ bash miniconda.sh -b -p /opt/conda
 Setup a conda environment and install dependencies using:
 
 ```bash
-conda env create -f requirements.yaml
+micromamba env create -y -f requirements.yaml --channel-priority flexible
 ```
 
 Activate the environment:
 
 ```bash
-conda activate e2d2-env
+conda activate dllm-dev
+# OR micromamba activate dllm-dev
 ```
 
 We also include a [`setup_env.sh`](./setup_env.sh) script that can be used to set up the
@@ -49,7 +64,7 @@ and replace the placeholder tokens with your own:
 # W&B / HF Setup
 export WANDB__SERVICE_WAIT=600
 export _WANDB_STARTUP_DEBUG="true"
-export WANDB_ENTITY="<WANDB_ENTITY>"
+export WANDB_ENTITY="kuleshov-group"
 export WANDB_API_KEY="<WANDB_API_KEY>"
 echo "Logging into W&B as '${WANDB_ENTITY}'."
 
@@ -80,7 +95,6 @@ were applied.
 ## 1. Code Organization
 1. [`bash_scripts`](bash_scripts): These shells scripts can be used to reproduce the
 experiments from our work.
-See [below](#2-reproducing-experiments).
 2. [`configs`](configs): We utilize hydra config files to organize experiments.
    1. [`config.yaml`](configs/config.yaml) This config is the entry point for launching
    training experiments.
@@ -109,51 +123,3 @@ See [below](#2-reproducing-experiments).
    Each denoiser is parameterized by a backbone.
    The denoiser can optionally, post-process the logit outputs of the backbone to
    produce log-probs over the clean sequence.
-
-
-## 2. Reproducing Experiments
-The shell scripts provided in [`bash_scripts`](bash_scripts) can be used to reproduce
-the training and evaluations from our work.
-- For training, the files follow a convention where the dataset and denoiser class are
-specified.
-For example, to train the fine-tuning E2D2 model on the GSM8K dataset, use the following
-shell script: [`run_train_e2d2_gsm8k.sh`](bash_scripts/run_train_e2d2_gsm8k.sh).
-- Once models have been trained, the provided evaluation scripts can be used to reproduce
-tables and figures from our work.
-For example, to evaluate models trained on the WMT translation dataset, use the
-following shell script: [`run_seq2seq_eval_wmt.sh`](bash_scripts/run_seq2seq_eval_wmt.sh).
-In that file, and similar ones for other evaluations, specify the path to the saved
-checkpoints, and uncomment the relevant section for a given denoiser class.
-We also provide scripts that will produce the generation throughput numbers we report.
-These files contain a `_tput` at the end of the script name.
-
-## 3. HuggingFace Integration
-We release the following models on HuggingFace:
-- E2D2 for text summarization (trained from scratch):
-[`kuleshov-group/e2d2-cnndm`](https://huggingface.co/kuleshov-group/e2d2-cnndm)
-- E2D2 for machine translation (trained from scratch):
-[`kuleshov-group/e2d2-wmt`](https://huggingface.co/kuleshov-group/e2d2-wmt)
-- E2D2 for mathematical reasoning (fine-tuned from Qwen3):
-[`kuleshov-group/e2d2-gsm8k-finetune-Qwen3-2B`](https://huggingface.co/kuleshov-group/e2d2-gsm8k-finetune-Qwen3-2B)
-- E2D2 trained on OpenWebText (trained from scratch):
-[`kuleshov-group/e2d2-owt`](https://huggingface.co/kuleshov-group/e2d2-owt)
-
-To use these models, follow the snippet below:
-```python
-from transformers import AutoModelForMaskedLM
-
-# model_config_overrides = {}  # Use this to optionally override config parameters
-model = AutoModelForMaskedLM.from_pretrained(
-    "kuleshov-group/e2d2-cnndm",  # Use one of the repos from above
-    trust_remote_code=True,
-    # **model_config_overrides,
-)
-```
-
-These models can also be used in the evaluation scripts by setting
-`pretrained_model_name_or_path=` to one of the options above.
-
-## Citation
-```
-TODO: Add bibtex
-```

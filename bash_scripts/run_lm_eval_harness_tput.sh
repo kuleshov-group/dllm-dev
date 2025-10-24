@@ -4,25 +4,26 @@ cd ../ || exit  # Go to the root directory of the repo
 source setup_env.sh
 
 QWEN_MODEL="Qwen/Qwen3-1.7B-Base"
+NUM_FEW_SHOT=0
 
 # TODO: Uncomment a model and run
 
 ########### AR
-#MODEL_PATH="outputs/<PATH_TO_AR_SAVED_MODEL_DIR>"
+#MODEL_PATH="${RUN_DIR}/<PATH_TO_AR_SAVED_MODEL_DIR>"
 #BLOCK_SIZE=1
 #KV_CACHING=true
 #ALIGN_INPUTS_TO_BLOCKS=true
 #USE_EMA=true
 
 ############ MDLM
-#MODEL_PATH="outputs/<PATH_TO_MDLM_SAVED_MODEL_DIR>"
+#MODEL_PATH="${RUN_DIR}/<PATH_TO_MDLM_SAVED_MODEL_DIR>"
 #BLOCK_SIZE=64
 #KV_CACHING=false
 #ALIGN_INPUTS_TO_BLOCKS=false
 #USE_EMA=true
 
 ############ BD3LM
-#MODEL_PATH="outputs/<PATH_TO_BD3LM_SAVED_MODEL_DIR>"
+#MODEL_PATH="${RUN_DIR}/<PATH_TO_BD3LM_SAVED_MODEL_DIR>"
 #BLOCK_SIZE=4
 #KV_CACHING=true
 #ALIGN_INPUTS_TO_BLOCKS=true
@@ -30,7 +31,7 @@ QWEN_MODEL="Qwen/Qwen3-1.7B-Base"
 
 ######## E2D2
 MODEL_PATH="kuleshov-group/e2d2-gsm8k-finetune-Qwen3-2B"
-# MODEL_PATH="outputs/<PATH_TO_E2D2_SAVED_MODEL_DIR>"
+# MODEL_PATH="${RUN_DIR}/<PATH_TO_E2D2_SAVED_MODEL_DIR>"
 BLOCK_SIZE=4
 KV_CACHING=true
 ALIGN_INPUTS_TO_BLOCKS=true
@@ -38,17 +39,6 @@ USE_EMA=true
 
 OUTPUT_DIR="outputs/${MODEL_PATH}/lm_eval_harness_output"
 REVISION=null
-
-mkdir -p ${OUTPUT_DIR}
-L=256
-T=${BLOCK_SIZE}
-DO_SAMPLE=false
-SAMPLING_STRATEGY="predict_and_noise"  # "predict_and_noise" or "posterior"
-FIRST_HITTING=true
-CONFIDENCE_BASED_NOISING=true
-CONFIDENCE_MARGIN_BASED_NOISING=false
-CKPT="best"
-USE_EMA=true
 
 OUTPUT_PATH="${OUTPUT_DIR}/ema${USE_EMA}_ckpt${CKPT}_${NUM_FEW_SHOT}shot_L${L}_block_size${BLOCK_SIZE}-do_sample${DO_SAMPLE}-sampling_strategy${SAMPLING_STRATEGY}-T${T}_first_hitting${FIRST_HITTING}-confidence_based_noising${CONFIDENCE_BASED_NOISING}-confidence_margin_based_noising${CONFIDENCE_MARGIN_BASED_NOISING}-align_inputs_to_blocks${ALIGN_INPUTS_TO_BLOCKS}"
 mkdir -p ${OUTPUT_PATH}

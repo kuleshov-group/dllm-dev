@@ -7,6 +7,7 @@ import torch.distributed as torch_dist
 from composer.models import HuggingFaceModel
 from composer.utils import dist, reproducibility
 from omegaconf import DictConfig, OmegaConf
+from streaming import StreamingDataset
 
 from scripts.utils import (
     count_parameters,
@@ -15,6 +16,7 @@ from scripts.utils import (
     print_and_save_config,
     register_useful_resolvers,
 )
+from src.datasets.streaming_dataset_hf import StreamingHFDataset
 
 log = logging.getLogger(__name__)
 
@@ -76,7 +78,12 @@ def main(cfg: DictConfig) -> None:
         cfg.train_dataset,
         tokenizer=tokenizer,
     )
-    train_sampler = dist.get_sampler(train_dataset, shuffle=True, drop_last=True)
+    train_sampler = (
+        dist.get_sampler(train_dataset, shuffle=True, drop_last=True)
+        if not isinstance(train_dataset, StreamingDataset)
+        and not isinstance(train_dataset, StreamingHFDataset)
+        else None
+    )
     train_dataloader = hydra.utils.instantiate(
         cfg.train_dataloader,
         _convert_="partial",
@@ -92,7 +99,11 @@ def main(cfg: DictConfig) -> None:
             cfg.eval_dataset,
             tokenizer=tokenizer,
         )
-        eval_sampler = dist.get_sampler(eval_dataset, shuffle=False, drop_last=False)
+        eval_sampler = (
+            dist.get_sampler(eval_dataset, shuffle=False, drop_last=False)
+            if not isinstance(eval_dataset, StreamingDataset)
+            else None
+        )
         eval_dataloader = hydra.utils.instantiate(
             cfg.eval_dataloader,
             _convert_="partial",
