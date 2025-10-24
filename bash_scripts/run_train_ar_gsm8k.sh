@@ -7,8 +7,6 @@ source setup_env.sh
 
 # Model arch
 N_LAYERS=28
-TOP_LAYERS=false
-REINIT_MODEL=false
 
 # Hyperparameters
 LR=1e-5
@@ -22,15 +20,8 @@ PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-1.7B-Base
 NUM_SHOT=0
 
 TAG="ar"
-if [ "${TOP_LAYERS}" == "true" ]; then
-  LAYERS="TOPlayers${N_LAYERS}"
-else
-  LAYERS="layers${N_LAYERS}"
-fi
+LAYERS="layers${N_LAYERS}"
 RUN_NAME=gsm8k-${NUM_SHOT}shot_lr${LR}_bsz${BATCH_SIZE}_warm${WARMUP_DURATION}_alphaf${ALPHA_F}_max-dur${MAX_DURATION}_${PRECISION}_${LAYERS}_${TAG}
-if [ "${REINIT_MODEL}" == "true" ]; then
-  RUN_NAME="${RUN_NAME}_reinit"
-fi
 
 MICRO_BATCH_SIZE=1
 NUM_WORKERS=0
@@ -52,7 +43,7 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   model=ar \
   model/backbone@model.config.backbone_config=automodel_for_causal_lm \
   model.config.length=768 \
-  model.config.backbone_config.reinit_model=true \
+  model.config.backbone_config.reinit_model=false \
   model.config.backbone_config.num_layers=${N_LAYERS} \
   model.config.backbone_config.keep_top_layers=false \
   training.global_batch_size=${BATCH_SIZE} \
