@@ -1,4 +1,4 @@
-# E2D2: Encoder-Decoder Diffusion Language Models for Efficient Training and Inference
+# ![icon](assets/icon.png) E2D2: Encoder-Decoder Diffusion Language Models for Efficient Training and Inference
 
 [![deploy](https://img.shields.io/badge/Paper_📃-green)](https://github.com/kuleshov-group/e2d2)
 [![deploy](https://img.shields.io/badge/Blog_📝%20%20-8A2BE2)](https://m-arriola.com/e2d2)
