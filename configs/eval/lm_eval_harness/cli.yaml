@@ -1,0 +1,28 @@
+# Configuration for LM Evaluation Harness CLI wrapper
+# 
+# This config maps directly to the lm_eval CLI from EleutherAI's lm-evaluation-harness:
+# https://github.com/EleutherAI/lm-evaluation-harness
+#
+# For documentation on the CLI arguments, see:
+# https://github.com/EleutherAI/lm-evaluation-harness/blob/main/docs/interface.md 
+#
+# The structure provides clear separation between:
+# - args: value-based CLI arguments (--arg value)  
+# - flags: boolean CLI flags (--flag, only added if true)
+
+# Value-based CLI arguments (--arg value)
+args:
+  model: "hf"
+  model_args: "pretrained=distilgpt2"
+  tasks: "arc_easy,hellaswag,winogrande"
+  batch_size: 1
+  num_fewshot: 0
+  output_path: "./outputs/lm_eval_harness"
+  device: cuda
+  seed: 42
+  limit: 3
+
+# Boolean flags (--flag, only added if true)
+flags:
+  log_samples: false
+  trust_remote_code: true
