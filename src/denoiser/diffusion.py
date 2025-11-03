@@ -431,7 +431,9 @@ class D3PM(Denoiser):
     ) -> Tuple[torch.LongTensor, Dict[str, torch.FloatTensor], Dict[str, Any]]:
         cache = cache if cache is not None else {}
         if model_output_cache is None:  # execute function evaluation
-            with torch.cuda.amp.autocast(dtype=torch.float32):
+            with torch.amp.autocast(
+                denoiser_inputs.xt.device.type, dtype=torch.float32
+            ):
                 backbone_output = self._backbone_forward(
                     denoiser_inputs,
                     fix_cache_length=True,  # Do not let kv cache grow on each forward call

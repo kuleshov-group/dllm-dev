@@ -355,7 +355,7 @@ class Denoiser(ABC, PreTrainedModel):
             past_key_values=past_key_values,
             t=t,
         )
-        with torch.cuda.amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast(input_ids.device.type, dtype=torch.float32):
             backbone_output = self._backbone_forward(denoiser_inputs, **kwargs)
             new_past_key_values = getattr(backbone_output, "past_key_values", None)
             backbone_output = getattr(backbone_output, "logits", backbone_output[0])
@@ -435,7 +435,7 @@ class Denoiser(ABC, PreTrainedModel):
         context_input, cache = self._prepare_inputs_inference(
             input_ids=inputs, cache=cache, return_updated_cache=True, **backbone_kwargs
         )
-        with torch.cuda.amp.autocast(dtype=torch.float32):
+        with torch.amp.autocast(inputs.device.type, dtype=torch.float32):
             backbone_output = self._backbone_forward(
                 context_input,
                 return_updated_cache=True,  # Will get absorbed in backbone_kwargs
