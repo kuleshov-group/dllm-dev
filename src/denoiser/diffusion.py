@@ -112,7 +112,13 @@ class DiffusionGenerationConfig(GenerationConfig):
         if self.first_hitting:
             # TODO: log.warn that this is being overridden
             self.num_steps = min(num_steps, self.block_size)
+        self.sampling_strategy = sampling_strategy
+        assert not confidence_based_noising or not confidence_margin_based_noising, (
+            "Cannot use both `confidence_based_noising` and"
+            " `confidence_margin_based_noising`."
+        )
         self.confidence_based_noising = confidence_based_noising
+        self.confidence_margin_based_noising = confidence_margin_based_noising
         self.confidence_threshold = confidence_threshold
         self.align_inputs_to_blocks = align_inputs_to_blocks
 
