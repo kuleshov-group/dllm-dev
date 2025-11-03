@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any, Dict, Literal, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import torch
 from tqdm.auto import tqdm
@@ -23,7 +23,6 @@ except ImportError:
 
 from src.denoiser.base import (
     Denoiser,
-    DenoiserConfig,
     DenoiserInput,
     LossAndNllOutput,
 )
@@ -44,11 +43,8 @@ class DiffusionGenerationConfig(GenerationConfig):
         min_t: float = 1e-5,
         block_size: Optional[int] = None,
         first_hitting: bool = False,
-        sampling_strategy: Literal["posterior", "predict_then_noise"] = "posterior",
         confidence_based_noising: bool = False,
-        confidence_margin_based_noising: bool = False,
         confidence_threshold: float = 1e6,
-        use_model_output_cache: bool = True,
         align_inputs_to_blocks: bool = True,
         **kwargs,
     ):
@@ -74,36 +70,14 @@ class DiffusionGenerationConfig(GenerationConfig):
                 (or block_size, for semi-autoregressive).
                 See https://arxiv.org/abs/2409.02908 for details.
                 Defaults to False.
-            sampling_strategy (str): Method for transitioning between latents.
-                Options:
-                    - "posterior" - Compute and sample from the posterior
-                        q(x_s | x_t, x_theta).
-                    - "predict_then_noise" - Sample from the denoising model x_theta,
-                        then add back noise to produce x_s.
-                        Only implemented for absorbing diffusion.
-                Defaults to "posterior".
             confidence_based_noising (bool): When using the "predict_then_noise"
                 strategy, whether to add noise to random positions or to those that have
                 the lowest probability under x_theta.
-                Cannot be used in conjunction with confidence_margin_based_noising.
-                Defaults to False.
-            confidence_margin_based_noising (bool): When using the "predict_then_noise"
-                strategy, whether to add noise to random positions or to those that have
-                the lowest probability margins under x_theta, where margin is defined as
-                the absolute difference between the top two probabilities at a given
-                position.
-                See https://arxiv.org/abs/2502.06768 for details.
-                Cannot be used in conjunction with confidence_based_noising.
                 Defaults to False.
             confidence_threshold (float): Confidence threshold to use for sampling.
                 Any tokens that exceed threshold are decoded.
                 See https://arxiv.org/abs/2505.22618 for details.
                 Defaults to 1e6.
-            use_model_output_cache (bool): Whether to re-use model's output, if sequence
-                is unchanged, because if xt == xs, we can simply re-use the denoising
-                model's outputs and save a function evaluation.
-                Relevant if model.backbone is not time/noise-conditioned.
-                Defaults to True.
             align_inputs_to_blocks (bool): Whether to align input tokens to block size,
                 e.g., for an input of length C and block size S, context will be C // S,
                 and generation will begin with a block whose first C % S tokens come
@@ -119,54 +93,23 @@ class DiffusionGenerationConfig(GenerationConfig):
         if self.first_hitting:
             # TODO: log.warn that this is being overridden
             self.num_steps = min(num_steps, self.block_size)
-        self.sampling_strategy = sampling_strategy
-        assert not confidence_based_noising or not confidence_margin_based_noising, (
-            "Cannot use both `confidence_based_noising` and"
-            " `confidence_margin_based_noising`."
-        )
         self.confidence_based_noising = confidence_based_noising
-        self.confidence_margin_based_noising = confidence_margin_based_noising
         self.confidence_threshold = confidence_threshold
-        self.use_model_output_cache = use_model_output_cache
         self.align_inputs_to_blocks = align_inputs_to_blocks
 
 
-class D3PMConfig(DenoiserConfig):
-    """Configuration class for D3PM models."""
+class MDLM(Denoiser):
+    """Denoiser class for MDLM models.
 
-    model_type = "d3pm"
-    auto_map = {
-        "AutoConfig": "diffusion.D3PMConfig",
-        "AutoModel": "diffusion.D3PM",
-        "AutoModelForMaskedLM": "diffusion.D3PM",
-    }
-
-    def __init__(
-        self,
-        keep_clean_bos: Optional[bool] = None,  # Whether to enforce un-noised BOS token
-        T: int = 1000,
-        diffusion_type: Literal["absorbing", "uniform"] = "absorbing",
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-        self.keep_clean_bos = keep_clean_bos
-        self.diffusion_type = diffusion_type
-        self.T = T
-
-
-class D3PM(Denoiser):
-    """Denoiser class for D3PM models.
-
-    This class implements the Denoiser interface for D3PM models.
+    This class implements the Denoiser interface for MDLM models.
     """
 
-    config_class = D3PMConfig
+    config_class = MDLMConfig
 
-    def __init__(self, config: D3PMConfig, **kwargs):
+    def __init__(self, config: MDLMConfig, **kwargs):
         super().__init__(config, **kwargs)
-        self.T = config.T
-        self.diffusion_type = config.diffusion_type
         self._create_static_mask()
+        self.neg_infinity = -1e12
 
     def _create_static_mask(self) -> None:
         static_mask = torch.ones(
@@ -194,22 +137,12 @@ class D3PM(Denoiser):
                 unchanged).
         """
         move_indices = torch.rand(*x0.shape, device=x0.device) < (1.0 - alpha_t)
-        if self.diffusion_type == "absorbing":
-            xt = torch.where(
-                (move_indices * (1 - context_mask)).bool(), self.mask_token_id, x0
-            )
-            if self.config.keep_clean_bos:
-                xt[..., 0] = x0[..., 0]
-            return xt  # type: ignore
-        if self.diffusion_type == "uniform":
-            prior = torch.randint(0, self.vocab_size, x0.shape, device=x0.device)
-            xt = torch.where((move_indices * (1 - context_mask)).bool(), prior, x0)
-            if self.config.keep_clean_bos:
-                xt[..., 0] = x0[..., 0]
-            return xt  # type: ignore
-        raise NotImplementedError(
-            f"Diffusion type '{self.diffusion_type}' not implemented."
+        xt = torch.where(
+            (move_indices * (1 - context_mask)).bool(), self.mask_token_id, x0
         )
+        if self.config.keep_clean_bos:
+            xt[..., 0] = x0[..., 0]
+        return xt  # type: ignore
 
     def _prepare_inputs(
         self,
@@ -318,7 +251,19 @@ class D3PM(Denoiser):
         denoiser_inputs: DenoiserInput,
         **kwargs,
     ) -> torch.FloatTensor:
-        return torch.log_softmax(backbone_output, dim=-1)  # type: ignore
+        # Zero-mask probability
+        backbone_output[..., self.mask_token_id] = self.neg_infinity
+        log_probs = backbone_output - torch.logsumexp(
+            backbone_output, dim=-1, keepdim=True
+        )
+        # Copy-over unmasked: For the log_probs of the unmasked tokens, set all values
+        # to -infinity except for the indices corresponding to
+        # the unmasked tokens.
+        xt = denoiser_inputs.xt
+        unmasked_indices = xt != self.mask_token_id
+        log_probs[unmasked_indices] = self.neg_infinity
+        log_probs[unmasked_indices, xt[unmasked_indices]] = 0
+        return log_probs  # type: ignore
 
     def _compute_loss(
         self,
@@ -326,24 +271,33 @@ class D3PM(Denoiser):
         denoiser_inputs: DenoiserInput,
         **kwargs: Any,
     ) -> LossAndNllOutput:
-        raise NotImplementedError
+        log_p_theta = torch.gather(
+            input=model_output, dim=-1, index=denoiser_inputs.x0[:, :, None]
+        ).squeeze(-1)
+        nlls = (
+            log_p_theta
+            * denoiser_inputs.alpha_t_prime
+            / (1 - denoiser_inputs.alpha_t)
+            * denoiser_inputs.tokens_mask
+        )
+        if self.training:
+            batch_nll = -(log_p_theta * denoiser_inputs.tokens_mask).sum(dim=-1)
+        else:
+            batch_nll = nlls.sum(dim=-1)
+        count = denoiser_inputs.tokens_mask.sum(dim=-1)
+        token_nll = (batch_nll / count).mean()
+        return LossAndNllOutput(
+            loss=token_nll,  # type: ignore
+            nlls=nlls,
+            other_loss_terms={
+                "masked_tokens": (denoiser_inputs.xt == self.mask_token_id).int()
+            },
+        )
 
     def _sample_prior(self, device, batch_size, length):
         """Samples from prior / limiting distribution."""
-        if self.diffusion_type == "absorbing":
-            return self.mask_token_id * torch.ones(
-                (batch_size, length), dtype=torch.int64, device=device
-            )
-        if self.diffusion_type == "uniform":
-            return torch.randint(
-                0,
-                self.vocab_size,
-                (batch_size, length),
-                device=device,
-                dtype=torch.int64,
-            )
-        raise NotImplementedError(
-            f"Diffusion type '{self.diffusion_type}' not implemented."
+        return self.mask_token_id * torch.ones(
+            (batch_size, length), dtype=torch.int64, device=device
         )
 
     def _compute_posterior(
@@ -363,29 +317,10 @@ class D3PM(Denoiser):
             alpha_t (Tensor): Noise schedule parameter at time t (B, 1, 1).
             alpha_s (Tensor): Noise schedule parameter at time s (B, 1, 1).
         """
-        if self.diffusion_type == "absorbing":
-            q_xs = x * (alpha_s - alpha_t)
-            q_xs[..., self.mask_token_id] = 1 - alpha_s[..., 0]
-            q_xs /= 1 - alpha_t
-            return q_xs  # type: ignore
-
-        alpha_ts = alpha_t / alpha_s
-        d_alpha = alpha_s - alpha_t
-        xt_one_hot = torch.nn.functional.one_hot(x, self.vocab_size)
-        limiting_distribution = torch.ones_like(xt_one_hot) / self.vocab_size
-        if self.diffusion_type == "uniform":
-            return (
-                alpha_t * self.vocab_size * x * xt_one_hot
-                + (alpha_ts - alpha_t) * xt_one_hot
-                + d_alpha * x
-                + (1 - alpha_ts) * (1 - alpha_s) * limiting_distribution
-            ) / (
-                alpha_t * self.vocab_size * torch.gather(x, -1, xt[..., None])
-                + (1 - alpha_t)
-            )
-        raise NotImplementedError(
-            f"Diffusion type {self.diffusion_type} not implemented."
-        )
+        q_xs = x * (alpha_s - alpha_t)
+        q_xs[..., self.mask_token_id] = 1 - alpha_s[..., 0]
+        q_xs /= 1 - alpha_t
+        return q_xs  # type: ignore
 
     @staticmethod
     def _sample_generation_timesteps(
@@ -399,17 +334,6 @@ class D3PM(Denoiser):
         if max_length is None:
             max_length = generation_config.max_new_tokens
 
-        if (
-            generation_config.first_hitting
-            # TODO: first-hitting does not work with posterior
-            and generation_config.sampling_strategy == "posterior"
-        ):
-            timesteps = torch.FloatTensor([1.0])
-            for i in range(max_length, 0, -1):
-                u = torch.rand(1)
-                next_t = timesteps[-1] * u ** (1 / i)
-                timesteps = torch.cat((timesteps, next_t), dim=0)
-            return timesteps[1:].to(device)  # type: ignore
         return torch.linspace(  # type: ignore
             1.0,
             generation_config.min_t,
@@ -456,71 +380,38 @@ class D3PM(Denoiser):
             x_theta = model_output_cache["x_theta"]
         model_output_cache = {"x_theta": x_theta}
         prob_check_denom = denoiser_inputs.xt.numel()
-        if generation_config.sampling_strategy == "posterior":
-            q_xs = self._compute_posterior(
-                x_theta, denoiser_inputs.xt, alpha_t, alpha_s
-            )
+        # assert (
+        #     abs((x_theta.sum() / prob_check_denom).item() - 1.0) < 1e-6
+        # ), "Denoising output probabilities not summing to 1."
+        # assert x_theta.isnan().sum().item() == 0, (
+        #     "NaN found in the denoising output."
+        # )
 
-            assert abs((q_xs.sum() / prob_check_denom).item() - 1.0) < 1e-6, (
-                "Posterior probabilities not summing to 1."
-            )
-            assert q_xs.isnan().sum().item() == 0, "NaN found in the posterior."
-            xs = self._sample_categorical(q_xs, generation_config.do_sample)
-            output = torch.where(
-                (denoiser_inputs.xt != self.mask_token_id).bool(),  # type: ignore
-                denoiser_inputs.xt,
-                xs,
-            )
-        elif generation_config.sampling_strategy == "predict_and_noise":
-            assert self.config.diffusion_type == "absorbing", (
-                "predict_and_noise decoding strategy only supports absorbing diffusion."
-            )
-            # assert (
-            #     abs((x_theta.sum() / prob_check_denom).item() - 1.0) < 1e-6
-            # ), "Denoising output probabilities not summing to 1."
-            # assert x_theta.isnan().sum().item() == 0, (
-            #     "NaN found in the denoising output."
-            # )
+        # Predict
+        xs = self._sample_categorical(x_theta, generation_config.do_sample)
+        xs_probs = x_theta.gather(-1, xs[..., None]).squeeze(dim=-1)
+        output = xs.clone()
 
-            # Predict
-            xs = self._sample_categorical(x_theta, generation_config.do_sample)
-            xs_probs = x_theta.gather(-1, xs[..., None]).squeeze(dim=-1)
-            output = xs.clone()
-
-            # Noise
-            num_noise_indices = torch.minimum(
-                ((1 - alpha_s) * generation_config.block_size).to(torch.int),
-                (denoiser_inputs.xt == self.mask_token_id).sum() - 1,  # type: ignore
+        # Noise
+        num_noise_indices = torch.minimum(
+            ((1 - alpha_s) * generation_config.block_size).to(torch.int),
+            (denoiser_inputs.xt == self.mask_token_id).sum() - 1,  # type: ignore
+        )
+        if generation_config.confidence_based_noising:
+            conf = x_theta.gather(-1, xs[..., None]).squeeze(-1)
+            conf = torch.where(  # already decoded tokens have 'inf' confidence
+                (denoiser_inputs.xt == self.mask_token_id).bool(),  # type: ignore
+                conf,
+                torch.inf,
             )
-            if generation_config.confidence_based_noising:
-                conf = x_theta.gather(-1, xs[..., None]).squeeze(-1)
-                conf = torch.where(  # already decoded tokens have 'inf' confidence
-                    (denoiser_inputs.xt == self.mask_token_id).bool(),  # type: ignore
-                    conf,
-                    torch.inf,
-                )
-                noise_indices = conf.argsort(dim=-1)[..., :num_noise_indices]
-            elif generation_config.confidence_margin_based_noising:
-                top2 = torch.topk(x_theta, k=2, dim=-1).values  # shape: (B, L, 2)
-                conf = (top2[..., 0] - top2[..., 1]).abs()
-                conf = torch.where(  # already decoded tokens have 'inf' confidence
-                    (denoiser_inputs.xt == self.mask_token_id).bool(),  # type: ignore
-                    conf,
-                    torch.inf,
-                )
-                noise_indices = conf.argsort(dim=-1)[..., :num_noise_indices]
-            else:
-                # TODO: implement random noise indices selection
-                raise NotImplementedError
-            output[..., noise_indices] = self.mask_token_id
-            output = torch.where(
-                xs_probs >= generation_config.confidence_threshold, xs, output
-            )
+            noise_indices = conf.argsort(dim=-1)[..., :num_noise_indices]
         else:
-            raise NotImplementedError(
-                f"Sampling strategy {generation_config.sampling_strategy} not"
-                " implemented."
-            )
+            # TODO: implement random noise indices selection
+            raise NotImplementedError
+        output[..., noise_indices] = self.mask_token_id
+        output = torch.where(
+            xs_probs >= generation_config.confidence_threshold, xs, output
+        )
         return output, model_output_cache, cache  # type: ignore
 
     @torch.no_grad()
@@ -658,18 +549,13 @@ class D3PM(Denoiser):
                     block_NFEs=block_NFEs,
                 )
 
-                if (
-                    not torch.allclose(xs, denoiser_inputs.xt)
-                    or not generation_config.use_model_output_cache
-                ):
+                if not torch.allclose(xs, denoiser_inputs.xt):
                     model_output_cache = None
                 if not generation_config.use_cache:
                     xt[..., -block_size:] = xs[..., -block_size:]
                 else:
                     xt = xs
-                if (
-                    xt == self.mask_token_id
-                ).sum().item() == 0 and self.config.diffusion_type == "absorbing":
+                if (xt == self.mask_token_id).sum().item() == 0:
                     break
             accumulated_samples[
                 :,
@@ -698,76 +584,6 @@ class D3PM(Denoiser):
                     cache=cache,
                 )
         return accumulated_samples  # type: ignore
-
-
-class MDLMConfig(D3PMConfig):
-    """Configuration class for MDLM models."""
-
-    model_type = "mdlm"
-    auto_map = {
-        "AutoConfig": "diffusion.MDLMConfig",
-        "AutoModel": "diffusion.MDLM",
-        "AutoModelForMaskedLM": "diffusion.MDLM",
-    }
-
-
-class MDLM(D3PM):
-    """Denoiser class for MDLM models."""
-
-    config_class = MDLMConfig
-
-    def __init__(self, config: MDLMConfig, **kwargs):
-        super().__init__(config, **kwargs)
-        self.neg_infinity = -1e12
-
-    def _forward(
-        self,
-        backbone_output: torch.FloatTensor,
-        denoiser_inputs: DenoiserInput,
-        **kwargs,
-    ) -> torch.FloatTensor:
-        # Zero-mask probability
-        backbone_output[..., self.mask_token_id] = self.neg_infinity
-        log_probs = backbone_output - torch.logsumexp(
-            backbone_output, dim=-1, keepdim=True
-        )
-        # Copy-over unmasked: For the log_probs of the unmasked tokens, set all values
-        # to -infinity except for the indices corresponding to
-        # the unmasked tokens.
-        xt = denoiser_inputs.xt
-        unmasked_indices = xt != self.mask_token_id
-        log_probs[unmasked_indices] = self.neg_infinity
-        log_probs[unmasked_indices, xt[unmasked_indices]] = 0
-        return log_probs  # type: ignore
-
-    def _compute_loss(
-        self,
-        model_output: torch.FloatTensor,
-        denoiser_inputs: DenoiserInput,
-        **kwargs: Any,
-    ) -> LossAndNllOutput:
-        log_p_theta = torch.gather(
-            input=model_output, dim=-1, index=denoiser_inputs.x0[:, :, None]
-        ).squeeze(-1)
-        nlls = (
-            log_p_theta
-            * denoiser_inputs.alpha_t_prime
-            / (1 - denoiser_inputs.alpha_t)
-            * denoiser_inputs.tokens_mask
-        )
-        if self.training:
-            batch_nll = -(log_p_theta * denoiser_inputs.tokens_mask).sum(dim=-1)
-        else:
-            batch_nll = nlls.sum(dim=-1)
-        count = denoiser_inputs.tokens_mask.sum(dim=-1)
-        token_nll = (batch_nll / count).mean()
-        return LossAndNllOutput(
-            loss=token_nll,  # type: ignore
-            nlls=nlls,
-            other_loss_terms={
-                "masked_tokens": (denoiser_inputs.xt == self.mask_token_id).int()
-            },
-        )
 
 
 class BD3LMConfig(MDLMConfig):
