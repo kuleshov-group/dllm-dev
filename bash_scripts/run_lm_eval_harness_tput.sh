@@ -40,7 +40,7 @@ USE_EMA=true
 OUTPUT_DIR="outputs/${MODEL_PATH}/lm_eval_harness_output"
 REVISION=null
 
-OUTPUT_PATH="${OUTPUT_DIR}/ema${USE_EMA}_ckpt${CKPT}_${NUM_FEW_SHOT}shot_L${L}_block_size${BLOCK_SIZE}-do_sample${DO_SAMPLE}-T${T}_first_hitting${FIRST_HITTING}-confidence_based_noising${CONFIDENCE_BASED_NOISING}-align_inputs_to_blocks${ALIGN_INPUTS_TO_BLOCKS}"
+OUTPUT_PATH="${OUTPUT_DIR}/ema${USE_EMA}_ckpt${CKPT}_${NUM_FEW_SHOT}shot_L${L}_block_size${BLOCK_SIZE}-do_sample${DO_SAMPLE}-sampling_strategy${SAMPLING_STRATEGY}-T${T}_first_hitting${FIRST_HITTING}-confidence_based_noising${CONFIDENCE_BASED_NOISING}-confidence_margin_based_noising${CONFIDENCE_MARGIN_BASED_NOISING}-align_inputs_to_blocks${ALIGN_INPUTS_TO_BLOCKS}"
 mkdir -p ${OUTPUT_PATH}
 
 accelerate launch scripts/eval/harness_eval.py \
@@ -60,8 +60,11 @@ accelerate launch scripts/eval/harness_eval.py \
   max_new_tokens=${L} \
   block_size=${BLOCK_SIZE} \
   generation_config.do_sample=${DO_SAMPLE} \
+  generation_config.sampling_strategy=${SAMPLING_STRATEGY} \
   generation_config.num_steps=${T} \
   generation_config.first_hitting=${FIRST_HITTING} \
+  generation_config.confidence_based_noising=${CONFIDENCE_BASED_NOISING} \
+  generation_config.confidence_margin_based_noising=${CONFIDENCE_MARGIN_BASED_NOISING} \
   generation_config.confidence_threshold=1.1 \
   generation_config.use_cache=${KV_CACHING} \
   generation_config.align_inputs_to_blocks=${ALIGN_INPUTS_TO_BLOCKS} \

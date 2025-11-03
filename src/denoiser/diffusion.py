@@ -43,7 +43,9 @@ class DiffusionGenerationConfig(GenerationConfig):
         min_t: float = 1e-5,
         block_size: Optional[int] = None,
         first_hitting: bool = False,
+        sampling_strategy: Literal["posterior", "predict_then_noise"] = "posterior",
         confidence_based_noising: bool = False,
+        confidence_margin_based_noising: bool = False,
         confidence_threshold: float = 1e6,
         align_inputs_to_blocks: bool = True,
         **kwargs,
@@ -70,9 +72,26 @@ class DiffusionGenerationConfig(GenerationConfig):
                 (or block_size, for semi-autoregressive).
                 See https://arxiv.org/abs/2409.02908 for details.
                 Defaults to False.
+            sampling_strategy (str): Method for transitioning between latents.
+                Options:
+                    - "posterior" - Compute and sample from the posterior
+                        q(x_s | x_t, x_theta).
+                    - "predict_then_noise" - Sample from the denoising model x_theta,
+                        then add back noise to produce x_s.
+                        Only implemented for absorbing diffusion.
+                Defaults to "posterior".
             confidence_based_noising (bool): When using the "predict_then_noise"
                 strategy, whether to add noise to random positions or to those that have
                 the lowest probability under x_theta.
+                Cannot be used in conjunction with confidence_margin_based_noising.
+                Defaults to False.
+            confidence_margin_based_noising (bool): When using the "predict_then_noise"
+                strategy, whether to add noise to random positions or to those that have
+                the lowest probability margins under x_theta, where margin is defined as
+                the absolute difference between the top two probabilities at a given
+                position.
+                See https://arxiv.org/abs/2502.06768 for details.
+                Cannot be used in conjunction with confidence_based_noising.
                 Defaults to False.
             confidence_threshold (float): Confidence threshold to use for sampling.
                 Any tokens that exceed threshold are decoded.
@@ -334,6 +353,17 @@ class MDLM(Denoiser):
         if max_length is None:
             max_length = generation_config.max_new_tokens
 
+        if (
+            generation_config.first_hitting
+            # TODO: first-hitting does not work with posterior
+            and generation_config.sampling_strategy == "posterior"
+        ):
+            timesteps = torch.FloatTensor([1.0])
+            for i in range(max_length, 0, -1):
+                u = torch.rand(1)
+                next_t = timesteps[-1] * u ** (1 / i)
+                timesteps = torch.cat((timesteps, next_t), dim=0)
+            return timesteps[1:].to(device)  # type: ignore
         return torch.linspace(  # type: ignore
             1.0,
             generation_config.min_t,
@@ -380,38 +410,71 @@ class MDLM(Denoiser):
             x_theta = model_output_cache["x_theta"]
         model_output_cache = {"x_theta": x_theta}
         prob_check_denom = denoiser_inputs.xt.numel()
-        # assert (
-        #     abs((x_theta.sum() / prob_check_denom).item() - 1.0) < 1e-6
-        # ), "Denoising output probabilities not summing to 1."
-        # assert x_theta.isnan().sum().item() == 0, (
-        #     "NaN found in the denoising output."
-        # )
-
-        # Predict
-        xs = self._sample_categorical(x_theta, generation_config.do_sample)
-        xs_probs = x_theta.gather(-1, xs[..., None]).squeeze(dim=-1)
-        output = xs.clone()
-
-        # Noise
-        num_noise_indices = torch.minimum(
-            ((1 - alpha_s) * generation_config.block_size).to(torch.int),
-            (denoiser_inputs.xt == self.mask_token_id).sum() - 1,  # type: ignore
-        )
-        if generation_config.confidence_based_noising:
-            conf = x_theta.gather(-1, xs[..., None]).squeeze(-1)
-            conf = torch.where(  # already decoded tokens have 'inf' confidence
-                (denoiser_inputs.xt == self.mask_token_id).bool(),  # type: ignore
-                conf,
-                torch.inf,
+        if generation_config.sampling_strategy == "posterior":
+            q_xs = self._compute_posterior(
+                x_theta, denoiser_inputs.xt, alpha_t, alpha_s
             )
-            noise_indices = conf.argsort(dim=-1)[..., :num_noise_indices]
+
+            assert abs((q_xs.sum() / prob_check_denom).item() - 1.0) < 1e-6, (
+                "Posterior probabilities not summing to 1."
+            )
+            assert q_xs.isnan().sum().item() == 0, "NaN found in the posterior."
+            xs = self._sample_categorical(q_xs, generation_config.do_sample)
+            output = torch.where(
+                (denoiser_inputs.xt != self.mask_token_id).bool(),  # type: ignore
+                denoiser_inputs.xt,
+                xs,
+            )
+        elif generation_config.sampling_strategy == "predict_and_noise":
+            assert self.config.diffusion_type == "absorbing", (
+                "predict_and_noise decoding strategy only supports absorbing diffusion."
+            )
+            # assert (
+            #     abs((x_theta.sum() / prob_check_denom).item() - 1.0) < 1e-6
+            # ), "Denoising output probabilities not summing to 1."
+            # assert x_theta.isnan().sum().item() == 0, (
+            #     "NaN found in the denoising output."
+            # )
+
+            # Predict
+            xs = self._sample_categorical(x_theta, generation_config.do_sample)
+            xs_probs = x_theta.gather(-1, xs[..., None]).squeeze(dim=-1)
+            output = xs.clone()
+
+            # Noise
+            num_noise_indices = torch.minimum(
+                ((1 - alpha_s) * generation_config.block_size).to(torch.int),
+                (denoiser_inputs.xt == self.mask_token_id).sum() - 1,  # type: ignore
+            )
+            if generation_config.confidence_based_noising:
+                conf = x_theta.gather(-1, xs[..., None]).squeeze(-1)
+                conf = torch.where(  # already decoded tokens have 'inf' confidence
+                    (denoiser_inputs.xt == self.mask_token_id).bool(),  # type: ignore
+                    conf,
+                    torch.inf,
+                )
+                noise_indices = conf.argsort(dim=-1)[..., :num_noise_indices]
+            elif generation_config.confidence_margin_based_noising:
+                top2 = torch.topk(x_theta, k=2, dim=-1).values  # shape: (B, L, 2)
+                conf = (top2[..., 0] - top2[..., 1]).abs()
+                conf = torch.where(  # already decoded tokens have 'inf' confidence
+                    (denoiser_inputs.xt == self.mask_token_id).bool(),  # type: ignore
+                    conf,
+                    torch.inf,
+                )
+                noise_indices = conf.argsort(dim=-1)[..., :num_noise_indices]
+            else:
+                # TODO: implement random noise indices selection
+                raise NotImplementedError
+            output[..., noise_indices] = self.mask_token_id
+            output = torch.where(
+                xs_probs >= generation_config.confidence_threshold, xs, output
+            )
         else:
-            # TODO: implement random noise indices selection
-            raise NotImplementedError
-        output[..., noise_indices] = self.mask_token_id
-        output = torch.where(
-            xs_probs >= generation_config.confidence_threshold, xs, output
-        )
+            raise NotImplementedError(
+                f"Sampling strategy {generation_config.sampling_strategy} not"
+                " implemented."
+            )
         return output, model_output_cache, cache  # type: ignore
 
     @torch.no_grad()

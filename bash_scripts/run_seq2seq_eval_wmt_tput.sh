@@ -41,13 +41,14 @@ mkdir -p ${OUTPUT_DIR}
 L=256
 T=${BLOCK_SIZE}
 DO_SAMPLE=false
+SAMPLING_STRATEGY="predict_and_noise" #"predict_and_noise" "posterior"
 FIRST_HITTING=true
 CONFIDENCE_BASED_NOISING=true
 MAX_LENGTH=1024
 CKPT="best"
 USE_EMA=true
 
-OUTPUT_PATH="${OUTPUT_DIR}/ema${USE_EMA}_ckpt${CKPT}_L${L}_block_size${BLOCK_SIZE}-do_sample${DO_SAMPLE}-T${T}_first_hitting${FIRST_HITTING}-confidence_based_noising${CONFIDENCE_BASED_NOISING}-align_inputs_to_blocks${ALIGN_INPUTS_TO_BLOCKS}"
+OUTPUT_PATH="${OUTPUT_DIR}/ema${USE_EMA}_ckpt${CKPT}_L${L}_block_size${BLOCK_SIZE}-do_sample${DO_SAMPLE}-sampling_strategy${SAMPLING_STRATEGY}-T${T}_first_hitting${FIRST_HITTING}-confidence_based_noising${CONFIDENCE_BASED_NOISING}-align_inputs_to_blocks${ALIGN_INPUTS_TO_BLOCKS}"
 PORT=29502
 torchrun --nproc_per_node ${NUM_VISIBLE_DEVICES} --master_port=${PORT} scripts/eval/seq2seq_eval.py \
 hydra.output_subdir=null \
@@ -68,6 +69,7 @@ max_new_tokens=${L} \
 block_size=${BLOCK_SIZE} \
 generation_config.num_steps=${T} \
 generation_config.do_sample=${DO_SAMPLE} \
+generation_config.sampling_strategy=${SAMPLING_STRATEGY} \
 generation_config.first_hitting=${FIRST_HITTING} \
 generation_config.confidence_based_noising=${CONFIDENCE_BASED_NOISING} \
 generation_config.use_cache=${KV_CACHING} \
