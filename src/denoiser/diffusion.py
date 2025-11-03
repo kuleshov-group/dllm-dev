@@ -1,5 +1,5 @@
 from functools import partial
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import torch
 from tqdm.auto import tqdm
@@ -121,6 +121,25 @@ class DiffusionGenerationConfig(GenerationConfig):
         self.confidence_margin_based_noising = confidence_margin_based_noising
         self.confidence_threshold = confidence_threshold
         self.align_inputs_to_blocks = align_inputs_to_blocks
+
+
+class MDLMConfig(DenoiserConfig):
+    """Configuration class for MDLM models."""
+
+    model_type = "mdlm"
+    auto_map = {
+        "AutoConfig": "diffusion.MDLMConfig",
+        "AutoModel": "diffusion.MDLM",
+        "AutoModelForMaskedLM": "diffusion.MDLM",
+    }
+
+    def __init__(
+        self,
+        keep_clean_bos: Optional[bool] = None,  # Whether to enforce un-noised BOS token
+        **kwargs,
+    ):
+        super().__init__(**kwargs)
+        self.keep_clean_bos = keep_clean_bos
 
 
 class MDLM(Denoiser):
@@ -317,12 +336,6 @@ class MDLM(Denoiser):
             other_loss_terms={
                 "masked_tokens": (denoiser_inputs.xt == self.mask_token_id).int()
             },
-        )
-
-    def _sample_prior(self, device, batch_size, length):
-        """Samples from prior / limiting distribution."""
-        return self.mask_token_id * torch.ones(
-            (batch_size, length), dtype=torch.int64, device=device
         )
 
     def _compute_posterior(
@@ -524,10 +537,8 @@ class MDLM(Denoiser):
         max_blocks = max_new_tokens // block_size
 
         # Sample max generation length tensor from prior
-        accumulated_samples = self._sample_prior(
-            device=device,
-            batch_size=batch_size,
-            length=max_blocks * block_size,
+        accumulated_samples = self.mask_token_id * torch.ones(
+            (batch_size, max_blocks * block_size), dtype=torch.int64, device=device
         )
         accumulated_samples = torch.cat([inputs, accumulated_samples], dim=-1)
         if generation_config.use_cache and inputs.numel() > 0:
