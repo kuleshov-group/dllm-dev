@@ -460,9 +460,8 @@ class LogGradientNorms(Callback):
                 total_norm += param_norm.item() ** 2
 
         # Log total gradient norm across all non-embedding parameters
-        if non_embedding_params > 0:
-            total_norm = total_norm ** (1.0 / 2)
-            metrics["grad_norm/total_non_embedding"] = total_norm
+        total_norm = total_norm ** (1.0 / 2)
+        metrics["grad_norm/total_non_embedding"] = total_norm
 
         if metrics:
             logger.log_metrics(metrics)
