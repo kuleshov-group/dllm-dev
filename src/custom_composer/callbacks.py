@@ -426,11 +426,13 @@ class LogGradientNorms(Callback):
     def __init__(
         self,
         log_frequency: int = 1,
+        include_embedding_params: bool = False,
         *args: Any,
         **kwargs: Any,
     ):
         super().__init__(*args, **kwargs)
         self.log_frequency = log_frequency
+        self.include_embedding_params = include_embedding_params
         self.step_count = 0
 
     def _is_embedding_param(self, param_name: str) -> bool:
@@ -455,13 +457,18 @@ class LogGradientNorms(Callback):
         total_norm = 0.0
 
         for name, param in model.named_parameters():
-            if param.grad is not None and not self._is_embedding_param(name):
+            if param.grad is not None and (
+                self.include_embedding_params or not self._is_embedding_param(name)
+            ):
                 param_norm = param.grad.data.norm(2)
                 total_norm += param_norm.item() ** 2
 
         # Log total gradient norm across all non-embedding parameters
         total_norm = total_norm ** (1.0 / 2)
-        metrics["grad_norm/total_non_embedding"] = total_norm
+        if self.include_embedding_params:
+            metrics["grad_norm/total"] = total_norm
+        else:
+            metrics["grad_norm/total_non_embedding"] = total_norm
 
         if metrics:
             logger.log_metrics(metrics)
