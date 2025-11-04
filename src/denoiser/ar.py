@@ -142,8 +142,7 @@ class AR(Denoiser):
             attention_mask=torch.ones_like(inputs),
             generation_config=generation_config,
             logits_processor=logits_processor,
-            # TODO: debug: passing EOS stopping criteria generates EOS right away?
-            # stopping_criteria=stopping_criteria,
+            stopping_criteria=stopping_criteria,
             max_length=max_length,
             max_new_tokens=max_new_tokens,
             # TODO: Can we pass this in `generation_config`?

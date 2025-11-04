@@ -651,8 +651,7 @@ class MDLM(Denoiser):
             if stopping_criteria is not None:
                 is_done = stopping_criteria(
                     input_ids=accumulated_samples[  # type: ignore
-                        :,
-                        inputs_offset : inputs_offset + ((block_id + 1) * block_size),
+                        :, : inputs_offset + ((block_id + 1) * block_size),
                     ],
                     scores=None,  # type: ignore
                 )
