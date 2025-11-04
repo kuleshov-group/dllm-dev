@@ -11,6 +11,10 @@ MODEL_PATH="Qwen/Qwen3-1.7B"  # Path to model checkpoint or HuggingFace model
 # MODEL_PATH="${RUN_DIR}/<PATH_TO_SAVED_MODEL_DIR>"  # Alternative: local checkpoint path
 REVISION=null
 
+# Saving configuration
+SAVE_INTERVAL=100
+BATCH_SIZE=4
+
 # Generation parameters
 L=256  # max_new_tokens
 DO_SAMPLE=false
@@ -42,11 +46,17 @@ torchrun --nproc_per_node ${NUM_VISIBLE_DEVICES} --master_port=${PORT} scripts/d
   output_path=${OUTPUT_PATH} \
   max_length=${MAX_LENGTH} \
   max_new_tokens=${L} \
-  batch_size=1 \
-  dataloader.batch_size=1 \
+  batch_size=${BATCH_SIZE} \
+  dataloader.batch_size=${BATCH_SIZE} \
   dataloader.num_workers=0 \
+  collator.global_batch_size=${BATCH_SIZE} \
+  collator.max_length=${MAX_LENGTH} \
+  collator.restricted_t_range=null \
+  collator.sampling_eps=1e-3 \
+  collator.antithetic_sampling=false \
   generation_config.do_sample=${DO_SAMPLE} \
   generation/stopping_criteria@stopping_criteria_list='[max_length_criteria,eos_token_criteria]' \
   ~generation/logits_processor@logits_processor_list \
-  gen_kwargs.logits_processor=null
+  gen_kwargs.logits_processor=null \
+  save_interval=${SAVE_INTERVAL}
 

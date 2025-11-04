@@ -5,7 +5,7 @@ import os
 import hydra
 import torch
 import torch.distributed as dist
-from datasets import Dataset, load_from_disk
+from datasets import Dataset, concatenate_datasets, load_from_disk
 from omegaconf import DictConfig
 from streaming import StreamingDataset
 from torch.utils.data import DataLoader, DistributedSampler
@@ -123,7 +123,7 @@ def save_dataset_incremental(
     else:
         # Append to existing dataset
         new_dataset = Dataset.from_list(new_samples)
-        distillation_dataset = Dataset.concatenate_datasets([existing_dataset, new_dataset])
+        distillation_dataset = concatenate_datasets([existing_dataset, new_dataset])
     
     # Save to disk
     if not fsspec_exists(output_path):
@@ -253,7 +253,7 @@ def main(cfg: DictConfig) -> None:
             # subset index i -> original index unprocessed_indices[i]
             subset_to_original_idx_map = {i: orig_idx for i, orig_idx in enumerate(unprocessed_indices)}
             # Subset the dataset to only include unprocessed indices
-            dataset = dataset.select(unprocessed_indices)
+            dataset.dataset = dataset.dataset.select(unprocessed_indices)
             # Need to recreate sampler and dataloader with filtered dataset
             sampler = DistributedSampler(
                 dataset,
@@ -262,11 +262,19 @@ def main(cfg: DictConfig) -> None:
                 shuffle=getattr(cfg.dataloader, "shuffle", False),
                 drop_last=getattr(cfg.dataloader, "drop_last", False),
             )
+            collator = hydra.utils.instantiate(
+                cfg.collator,
+                rank=dist.get_rank(),
+                world_size=dist.get_world_size(),
+                tokenizer=tokenizer,
+                max_length=getattr(cfg, "max_length", None),
+            )
             dataloader = hydra.utils.instantiate(
                 cfg.dataloader,
                 _convert_="partial",
                 dataset=dataset,
                 sampler=sampler,
+                collate_fn=collator,
             )
         else:
             if local_rank == 0:
