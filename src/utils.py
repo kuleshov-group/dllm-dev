@@ -256,7 +256,22 @@ def save_pretrained_or_push_to_hub(
     log.debug(f"{'Saving' if local else 'Pushing'} model to {repo_id}")
     if local:
         model.save_pretrained(dest_path, safe_serialization=False)
-        tokenizer.save_pretrained(dest_path)
+        # Try to save tokenizer without chat_template, fallback to removing it after
+        try:
+            # Newer transformers versions support save_chat_template parameter
+            tokenizer.save_pretrained(dest_path, save_chat_template=False)
+        except TypeError:
+            # Older versions don't support the parameter, save normally and remove the file
+            tokenizer.save_pretrained(dest_path)
+            # Remove chat_template.jinja if it exists, as composer's get_metadata() doesn't expect it
+            # Check both possible locations (root and tokenizer subdirectory)
+            for chat_template_path in [
+                dest_path / "chat_template.jinja",
+                dest_path / "tokenizer" / "chat_template.jinja",
+            ]:
+                if chat_template_path.exists():
+                    chat_template_path.unlink()
+                    log.debug(f"Removed {chat_template_path} to avoid composer metadata issues")
     else:
         if not repo_id:
             raise ValueError("Argument `repo_id` is required for push_to_hub.")
