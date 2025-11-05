@@ -114,6 +114,10 @@ class DenoisingCollator:
             max_length = self.max_length
         elif self.padding == "longest" or self.padding:
             max_length = max(f["input_ids"].shape[-1] for f in features)
+        if self.max_length is not None:
+            max_length = min(max_length, self.max_length)
+        batch["input_ids"] = batch["input_ids"][..., : max_length]
+        batch["attention_mask"] = batch["attention_mask"][..., : max_length]
         if all([c is not None for c in context_mask]):
             context_mask = torch.nn.utils.rnn.pad_sequence(
                 context_mask,  # type: ignore

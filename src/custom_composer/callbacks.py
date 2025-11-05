@@ -4,6 +4,8 @@ import os
 import pathlib
 import shutil
 import time
+from functools import wraps
+from pathlib import Path
 from typing import Any, Literal
 
 import torch
@@ -21,6 +23,71 @@ from src.utils import (
 
 log = logging.getLogger(__name__)
 __all__ = ["DataloaderSpeedMonitor", "LogGradientNorms"]
+
+
+def _patch_tokenizer_save_pretrained(tokenizer):
+    """Patch tokenizer.save_pretrained to remove chat_template.jinja after saving.
+    
+    This is needed because composer's get_metadata() doesn't expect this file.
+    """
+    # Check if already patched to avoid double-patching
+    if hasattr(tokenizer.save_pretrained, "_patched_for_composer"):
+        return
+    
+    original_save_pretrained = tokenizer.save_pretrained
+    
+    @wraps(original_save_pretrained)
+    def patched_save_pretrained(save_directory, **kwargs):
+        # Try to save without chat_template first if supported and not explicitly set
+        if "save_chat_template" not in kwargs:
+            try:
+                result = original_save_pretrained(save_directory, save_chat_template=False, **kwargs)
+                # Double-check that file wasn't created anyway
+                _remove_chat_template_files(save_directory)
+                return result
+            except TypeError:
+                # Older versions don't support save_chat_template, fall through to normal save
+                pass
+        
+        # Save normally (either save_chat_template was in kwargs, or version doesn't support it)
+        result = original_save_pretrained(save_directory, **kwargs)
+        # Remove chat_template.jinja immediately after saving, before composer checks
+        _remove_chat_template_files(save_directory)
+        return result
+    
+    # Mark as patched to avoid double-patching
+    patched_save_pretrained._patched_for_composer = True
+    tokenizer.save_pretrained = patched_save_pretrained
+
+
+def _remove_chat_template_files(save_directory):
+    """Remove chat_template.jinja files from save directory and subdirectories."""
+    save_path = Path(save_directory)
+    # Check multiple possible locations
+    paths_to_check = [
+        save_path / "chat_template.jinja",
+        save_path / "tokenizer" / "chat_template.jinja",
+    ]
+    # Also check if save_directory itself is a tokenizer subdirectory
+    if save_path.name == "tokenizer":
+        paths_to_check.append(save_path / "chat_template.jinja")
+        paths_to_check.append(save_path.parent / "chat_template.jinja")
+    
+    # Also recursively search for the file in case structure is different
+    try:
+        for root, dirs, files in os.walk(save_path):
+            if "chat_template.jinja" in files:
+                paths_to_check.append(Path(root) / "chat_template.jinja")
+    except Exception:
+        pass  # If walk fails, just use the paths we already have
+    
+    for chat_template_path in paths_to_check:
+        try:
+            if chat_template_path.exists():
+                chat_template_path.unlink()
+                log.debug(f"Removed {chat_template_path} to avoid composer metadata issues")
+        except Exception as e:
+            log.warning(f"Failed to remove {chat_template_path}: {e}")
 
 
 class DataloaderSpeedMonitor(Callback):
@@ -83,6 +150,19 @@ class HuggingFaceCompatibleCheckpointing(CheckpointSaver):
 
     def fit_start(self, state: State, logger: Logger) -> None:
         super().fit_start(state, logger)
+        # Patch tokenizer to remove chat_template.jinja after saving
+        # This prevents composer's get_metadata() from failing
+        # Must patch on all ranks, not just rank 0
+        tokenizer = (
+            state.model.module.tokenizer
+            if hasattr(state.model, "module")
+            else state.model.tokenizer
+        )
+        if tokenizer is not None:
+            _patch_tokenizer_save_pretrained(tokenizer)
+            log.info(f"Patched tokenizer.save_pretrained on rank {dist.get_global_rank()} to remove chat_template.jinja")
+        else:
+            log.warning(f"Tokenizer not found on rank {dist.get_global_rank()}, cannot patch!")
         if dist.get_global_rank() == 0 and not self.disable_hf:
             self.project_root = snapshot_repo_to_tmp_dir(tmp_dir_exists_ok=True)
             log.info(f"Created tmp repo for HF checkpointing at {self.project_root}")

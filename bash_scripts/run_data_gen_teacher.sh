@@ -18,7 +18,7 @@ BATCH_SIZE=4
 # Generation parameters
 L=256  # max_new_tokens
 DO_SAMPLE=false
-MAX_LENGTH=1024
+MAX_LENGTH=1023
 
 # Dataset configuration
 DATASET_CONFIG="gsm8k_train"  # Options: gsm8k_train, gsm8k_eval, wmt_train, etc.
