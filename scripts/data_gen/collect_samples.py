@@ -1,6 +1,8 @@
 import datetime
 import json
 import os
+import shutil
+import tempfile
 
 import hydra
 import torch
@@ -12,6 +14,8 @@ from torch.utils.data import DataLoader, DistributedSampler
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoModelForMaskedLM, GenerationConfig
 from transformers.generation import StopStringCriteria
+import fsspec
+import logging
 
 from src.datasets.streaming_dataset_hf import StreamingHFDataset
 
@@ -125,12 +129,163 @@ def save_dataset_incremental(
         new_dataset = Dataset.from_list(new_samples)
         distillation_dataset = concatenate_datasets([existing_dataset, new_dataset])
     
-    # Save to disk
-    if not fsspec_exists(output_path):
-        fsspec_mkdirs(output_path)
-    distillation_dataset.save_to_disk(output_path)
+    # Save to a temporary location first to avoid overwriting the dataset while it's in use
+    # HuggingFace datasets doesn't allow overwriting a dataset while it's loaded    
+    # Check if this is a local filesystem path
+    fs_output, path_output = fsspec.core.url_to_fs(output_path)
+    try:
+        is_local = isinstance(fs_output, fsspec.implementations.local.LocalFileSystem)
+    except Exception:
+        # Fallback: check if path doesn't contain protocol separator
+        is_local = '://' not in output_path or output_path == path_output
     
-    return distillation_dataset
+    if is_local:
+        # Local filesystem: use simple temp directory approach
+        output_dir = os.path.dirname(output_path) if os.path.dirname(output_path) else "."
+        temp_dir = tempfile.mkdtemp(prefix="dataset_save_", dir=output_dir)
+        temp_path = os.path.join(temp_dir, os.path.basename(output_path))
+        
+        try:
+            # Save to temporary location
+            distillation_dataset.save_to_disk(temp_path)
+            
+            # Remove old dataset files if output_path exists (but preserve other files like "progress")
+            if os.path.exists(output_path):
+                # Only remove dataset-specific files, not the entire directory
+                # HuggingFace datasets typically create: dataset_info.json, state.json, and data files
+                # List all items in the directory to selectively remove only dataset files
+                items_to_remove = []
+                for item in os.listdir(output_path):
+                    item_path = os.path.join(output_path, item)
+                    # Skip the "progress" directory - we want to keep it
+                    if item == "progress":
+                        continue
+                    # Remove dataset metadata files
+                    if item in ["dataset_info.json", "state.json"]:
+                        items_to_remove.append(item_path)
+                    # Remove arrow data files (can be files or directories)
+                    elif item.startswith("data-"):
+                        items_to_remove.append(item_path)
+                
+                # Remove identified dataset files/directories
+                for item_path in items_to_remove:
+                    try:
+                        if os.path.isdir(item_path):
+                            shutil.rmtree(item_path)
+                        else:
+                            os.remove(item_path)
+                    except Exception as e:
+                        # Log but continue if we can't remove a file
+                        logging.warning(f"Could not remove {item_path}: {e}")
+            
+            # Ensure output directory exists
+            os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else ".", exist_ok=True)
+            os.makedirs(output_path, exist_ok=True)
+            
+            # Copy dataset files from temp to final location (preserving other files in output_path)
+            for item in os.listdir(temp_path):
+                src = os.path.join(temp_path, item)
+                dst = os.path.join(output_path, item)
+                if os.path.isdir(src):
+                    if os.path.exists(dst):
+                        shutil.rmtree(dst)
+                    shutil.copytree(src, dst)
+                else:
+                    if os.path.exists(dst):
+                        os.remove(dst)
+                    shutil.copy2(src, dst)
+            
+            # Clean up temporary directory
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass  # Ignore cleanup errors
+            
+        except Exception as e:
+            # Clean up temp directory on error
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+            raise e
+    else:
+        # Remote filesystem (S3, etc.): use fsspec operations
+        # Create temp directory locally
+        temp_dir = tempfile.mkdtemp(prefix="dataset_save_")
+        temp_path = os.path.join(temp_dir, os.path.basename(output_path))
+        
+        try:
+            # Save to temporary location (local)
+            distillation_dataset.save_to_disk(temp_path)
+            
+            # Remove old dataset if it exists
+            if fs_output.exists(path_output):
+                # Recursively delete all files in the directory
+                def _rm_recursive(fs, path):
+                    """Recursively remove directory using fsspec."""
+                    try:
+                        if hasattr(fs, 'rm') and 'recursive' in fs.rm.__code__.co_varnames:
+                            fs.rm(path, recursive=True)
+                        else:
+                            # Manual recursive deletion
+                            items = fs.listdir(path)
+                            for item in items:
+                                item_path = os.path.join(path, item)
+                                if fs.isdir(item_path):
+                                    _rm_recursive(fs, item_path)
+                                else:
+                                    fs.rm(item_path)
+                            fs.rmdir(path)
+                    except Exception:
+                        # If directory doesn't exist or other error, try simple rm
+                        try:
+                            fs.rm(path, recursive=True)
+                        except Exception:
+                            pass
+                
+                _rm_recursive(fs_output, path_output)
+            
+            # Copy from temp (local) to final (remote) location
+            # Use shutil.copytree to copy local temp to remote via fsspec
+            def _copy_local_to_remote(local_path, remote_path, remote_fs):
+                """Copy local directory to remote location using fsspec."""
+                for root, dirs, files in os.walk(local_path):
+                    rel_root = os.path.relpath(root, local_path)
+                    if rel_root == '.':
+                        remote_root = remote_path
+                    else:
+                        remote_root = os.path.join(remote_path, rel_root)
+                    
+                    # Create remote directory
+                    remote_fs.makedirs(remote_root, exist_ok=True)
+                    
+                    # Copy files
+                    for file in files:
+                        local_file = os.path.join(root, file)
+                        remote_file = os.path.join(remote_root, file)
+                        with open(local_file, 'rb') as src, remote_fs.open(remote_file, 'wb') as dst:
+                            dst.write(src.read())
+            
+            _copy_local_to_remote(temp_path, path_output, fs_output)
+            
+            # Clean up temporary directory
+            try:
+                shutil.rmtree(temp_dir)
+            except Exception:
+                pass  # Ignore cleanup errors
+            
+        except Exception as e:
+            # Clean up temp directory on error
+            try:
+                if os.path.exists(temp_dir):
+                    shutil.rmtree(temp_dir)
+            except Exception:
+                pass
+            raise e
+    
+    # Reload the dataset from the saved location
+    return load_from_disk(output_path)
 
 
 def setup_ddp() -> int:
@@ -147,6 +302,14 @@ def setup_ddp() -> int:
 
 @hydra.main(version_base=None, config_path="../../configs", config_name="data_gen_config")
 def main(cfg: DictConfig) -> None:
+    # Configure logging level from environment variable or config
+    log_level = os.getenv("LOG_LEVEL", getattr(cfg, "log_level", "INFO")).upper()
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.INFO),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        force=True  # Override any existing configuration
+    )
+    
     set_seed(cfg.seed)
     local_rank = setup_ddp()
     device = f"cuda:{local_rank}" if torch.cuda.is_available() else "cpu"
@@ -155,6 +318,9 @@ def main(cfg: DictConfig) -> None:
     # Load tokenizer
     tokenizer = hydra.utils.instantiate(cfg.tokenizer)
     tokenizer = maybe_add_missing_special_tokens(tokenizer)
+
+    bos_token_id = 151644
+    assert tokenizer.decode(torch.tensor([bos_token_id])) == "<|im_start|>", "Bos token ID is not correct"
 
     # Load the dataset
     dataset = hydra.utils.instantiate(
@@ -241,12 +407,12 @@ def main(cfg: DictConfig) -> None:
     subset_to_original_idx_map = None
     original_dataset_size = len(dataset) if not is_streaming else None
     
-    if not is_streaming and global_processed_indices:
+    if not is_streaming:
         # Calculate unprocessed indices
         all_indices = set(range(len(dataset)))
         unprocessed_indices = sorted(list(all_indices - global_processed_indices))
         
-        if unprocessed_indices:
+        if len(unprocessed_indices) > 0:
             if local_rank == 0:
                 print(f"Subsetting dataset: {len(unprocessed_indices)} unprocessed samples out of {len(dataset)} total")
             # Create mapping from subset indices to original indices
@@ -310,21 +476,10 @@ def main(cfg: DictConfig) -> None:
         input_ids = elem["input_ids"].to(device)  # type: ignore
         batch_size = input_ids.shape[0]
         
-        # Handle target_prompt_text if dataset has it
-        if hasattr(dataset, "target_prompt_text") and dataset.target_prompt_text is not None:
-            post_prompt_ids = (
-                torch.tensor(tokenizer.encode(dataset.target_prompt_text.strip()))
-                .to(input_ids.dtype)
-                .to(input_ids.device)
-                .unsqueeze(0)
-            )
-            # Add prompt to each item in the batch
-            post_prompt_ids = post_prompt_ids.repeat(batch_size, 1)
-            prompt_ids = torch.cat((input_ids[:, :torch.where(input_ids[0] == tokenizer.eos_token_id)[0][1] + 1], post_prompt_ids), dim=-1)
         # Generate samples
         with torch.no_grad():
             outputs = model.generate(
-                inputs=prompt_ids,
+                inputs=input_ids,
                 **gen_kwargs,
             )
         # Process each sample in the batch
@@ -345,18 +500,22 @@ def main(cfg: DictConfig) -> None:
             else:
                 # For streaming datasets, we can't reliably track indices
                 # Use a placeholder or skip tracking
-                dataset_idx = -1  # Indicates we can't track the index
-                # Note: For streaming datasets, we can't skip already-processed samples
-                # because we don't have reliable index tracking. This is a limitation
-                # of streaming datasets.
+                dataset_idx = -1  # Indicates we can't track the index=
 
             # Add EOS token to output (truncated from stopping criteria)
             sample_output_ids = torch.cat((outputs[i], torch.tensor([tokenizer.eos_token_id]).to(input_ids.device)), dim=-1)
             
+            # Remove padding tokens
+            sample_output_ids = sample_output_ids[
+                torch.where(sample_output_ids == bos_token_id)[0][0]:
+                torch.where(sample_output_ids == tokenizer.eos_token_id)[0][1] + 1
+            ]
+
+            logging.info(f"Generated sample: {tokenizer.decode(sample_output_ids)}")
+
             # Add to buffer
             local_samples_buffer.append({
                 "input_ids": sample_output_ids.cpu().tolist(),
-                "original_input_ids": input_ids[i].cpu().tolist(),
                 "dataset_idx": dataset_idx,  # Store original index for tracking
             })
             if dataset_idx != -1:  # Only track indices we can reliably map

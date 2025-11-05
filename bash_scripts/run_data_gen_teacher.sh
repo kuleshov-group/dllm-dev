@@ -7,7 +7,7 @@ source setup_env.sh
 # Modify these parameters as needed
 
 # Model configuration
-MODEL_PATH="Qwen/Qwen3-1.7B"  # Path to model checkpoint or HuggingFace model
+MODEL_PATH="Qwen/Qwen3-32B-AWQ"  # Path to model checkpoint or HuggingFace model
 # MODEL_PATH="${RUN_DIR}/<PATH_TO_SAVED_MODEL_DIR>"  # Alternative: local checkpoint path
 REVISION=null
 
@@ -32,7 +32,11 @@ mkdir -p ${OUTPUT_PATH}
 NUM_VISIBLE_DEVICES=${NUM_VISIBLE_DEVICES:-1}  # Number of GPUs to use
 PORT=29500
 
+SYSTEM_PROMPT="Please reason step by step, and put your final answer within $\\boxed{}$."
+
 # Run the collection script
+# Set LOG_LEVEL to WARNING or ERROR to disable INFO logging (options: DEBUG, INFO, WARNING, ERROR, CRITICAL)
+export LOG_LEVEL=${LOG_LEVEL:-WARNING}  # Default to WARNING to suppress INFO logs
 torchrun --nproc_per_node ${NUM_VISIBLE_DEVICES} --master_port=${PORT} scripts/data_gen/collect_samples.py \
   hydra.output_subdir=null \
   hydra.run.dir="${PWD}" \
@@ -40,20 +44,18 @@ torchrun --nproc_per_node ${NUM_VISIBLE_DEVICES} --master_port=${PORT} scripts/d
   hydra/hydra_logging=disabled \
   dataset=${DATASET_CONFIG} \
   dataset.max_length=${MAX_LENGTH} \
+  +dataset.exclude_ground_truth=true \
+  dataset.use_chat_template=true \
   pretrained_model_name_or_path=${MODEL_PATH} \
   pretrained_model_revision=${REVISION} \
-  tokenizer.pretrained_model_name_or_path="Qwen/Qwen3-0.6B-Base" \
+  tokenizer.pretrained_model_name_or_path=${MODEL_PATH} \
+  tokenizer.padding_side=left \
   output_path=${OUTPUT_PATH} \
   max_length=${MAX_LENGTH} \
   max_new_tokens=${L} \
   batch_size=${BATCH_SIZE} \
   dataloader.batch_size=${BATCH_SIZE} \
   dataloader.num_workers=0 \
-  collator.global_batch_size=${BATCH_SIZE} \
-  collator.max_length=${MAX_LENGTH} \
-  collator.restricted_t_range=null \
-  collator.sampling_eps=1e-3 \
-  collator.antithetic_sampling=false \
   generation_config.do_sample=${DO_SAMPLE} \
   generation/stopping_criteria@stopping_criteria_list='[max_length_criteria,eos_token_criteria]' \
   ~generation/logits_processor@logits_processor_list \

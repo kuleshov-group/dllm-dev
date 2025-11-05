@@ -12,7 +12,6 @@ class DenoisingCollator:
     def __init__(
         self,
         tokenizer: PreTrainedTokenizerBase,
-        global_batch_size: int,
         rank: int = 0,
         world_size: int = 1,
         padding: bool = True,
@@ -29,7 +28,6 @@ class DenoisingCollator:
         """
         Parameters:
             tokenizer (PreTrainedTokenizerBase): Tokenizer used in base collator
-            global_batch_size (int): Used for sampling t.
             rank (int): Used for sampling t.
             world_size (int): Used for sampling t.
             padding (bool; default: True): Whether to pad the sequences
@@ -61,12 +59,13 @@ class DenoisingCollator:
                 pad_to_multiple_of=pad_to_multiple_of,
                 return_tensors=return_tensors,
             )
+        self.padding = padding
+        assert self.padding in {"max_length", "longest", True}
         self.padding_side = tokenizer.padding_side
         self.predict_padding = predict_padding
         self.restricted_t_range = restricted_t_range
         self.sampling_eps = sampling_eps
         self.antithetic_sampling = antithetic_sampling
-        self.global_batch_size = global_batch_size
         self.max_length = max_length
         self.block_size = block_size
         # TODO: Confirm that this works on multi-node
@@ -111,16 +110,20 @@ class DenoisingCollator:
             t_index=t_index,
             device=batch["input_ids"].device,
         )
+        if self.padding == "max_length":
+            max_length = self.max_length
+        elif self.padding == "longest" or self.padding:
+            max_length = max(f["input_ids"].shape[-1] for f in features)
         if all([c is not None for c in context_mask]):
             context_mask = torch.nn.utils.rnn.pad_sequence(
                 context_mask,  # type: ignore
                 batch_first=True,
-            )[..., : self.max_length]
+            )[..., : max_length]
             context_mask = torch.nn.functional.pad(
                 context_mask,
-                (0, self.max_length - context_mask.shape[-1])
+                (0, max_length - context_mask.shape[-1])
                 if self.padding_side == "right"
-                else (self.max_length - context_mask.shape[-1], 0),
+                else (max_length - context_mask.shape[-1], 0),
             )
             batch.update({"context_mask": context_mask})
         batch.update({"t": t})
