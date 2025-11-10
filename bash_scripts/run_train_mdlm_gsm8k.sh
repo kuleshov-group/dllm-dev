@@ -41,7 +41,6 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   composer.trainer.precision=${PRECISION} \
   composer.trainer.eval_interval="1000ba" \
   composer.trainer.max_duration=${MAX_DURATION} \
-  composer.trainer.save_num_checkpoints_to_keep=1 \
   composer/lr_scheduler=cosine_annealing_with_warmup \
   composer.lr_scheduler.t_warmup=${WARMUP_DURATION} \
   composer.lr_scheduler.alpha_f=${ALPHA_F} \
@@ -56,9 +55,10 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   training.grad_accum=$(( BATCH_SIZE / NUM_VISIBLE_DEVICES / MICRO_BATCH_SIZE )) \
   training.antithetic_sampling=false \
   hydra.run.dir=${RUN_DIR}/${RUN_NAME} \
-  composer.trainer.save_interval="1000ba" \
   composer.loggers.name=${RUN_NAME} \
   train_dataloader.num_workers=${NUM_WORKERS} \
+  composer.callbacks.hf_compatible_checkpointing.save_interval="1000ba" \
+  composer.callbacks.hf_compatible_checkpointing.num_checkpoints_to_keep=1 \
   composer.callbacks.hf_compatible_checkpointing.disable_hf=true \
-  composer.callbacks.save_best_checkpointing.save_local=false \
-  eval_dataloader.batch_size=4
+  eval_dataloader.batch_size=8 \
+  eval_evaluator.device_eval_microbatch_size=8
