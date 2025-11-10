@@ -7,5 +7,8 @@ return_tensors: "pt"
 predict_padding: false
 restricted_t_range: ${training.restricted_t_range}
 sampling_eps: ${training.sampling_eps}
+# Disable for datasets that have prompt / context
 antithetic_sampling: ${training.antithetic_sampling}
 block_size: ${block_size}
+presample_t: false
+dataset_size: null
