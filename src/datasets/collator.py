@@ -25,6 +25,8 @@ class DenoisingCollator:
         antithetic_sampling: bool = False,
         block_size: int | None = None,
         base_collator: Callable | None = None,
+        presample_t: bool = False,
+        dataset_size: int | None = None,
     ):
         """
         Parameters:
@@ -50,6 +52,11 @@ class DenoisingCollator:
                 If not specified, sampled t will have shape (batch_size,)
             base_collator (Optional: Callable): The base collator that is being wrapped.
                 If None, defaults to transformers.DataCollatorWithPadding.
+            presample_t (bool; default: False): Whether to pre-sample timesteps.
+                Can be used to ensure reproducible validation results that are
+                independent per device eval batch size.
+            dataset_size (int | None): Used for pre-sampling t.
+                Must be provided if `presample_t` is True.
         """
         if base_collator is not None:
             self.base_collate_fn = base_collator
@@ -72,6 +79,18 @@ class DenoisingCollator:
         # TODO: Confirm that this works on multi-node
         self._rank = rank
         self._world_size = world_size
+        if presample_t:
+            if dataset_size is None:
+                raise ValueError("Dataset size must be provided tp pre-sample t.")
+            # TODO: enable presampling w/antithetic
+            self._presampled_t = self._sample_t(
+                global_batch_size=dataset_size,
+                batch_size=dataset_size,
+                t_index=(0, dataset_size),
+                device="cpu",
+            )
+        else:
+            self._presampled_t = None
 
     def _sample_t(self, global_batch_size, batch_size, t_index, device):
         num_blocks = self.max_length // self.block_size if self.block_size else 1
@@ -80,13 +99,15 @@ class DenoisingCollator:
         else:
             _eps_t = torch.rand(batch_size, device=device)
         if self.antithetic_sampling:
-            offset = torch.arange(
-                start=t_index[0] * num_blocks,
-                end=t_index[1] * num_blocks,
-                device=device,
-            ) / (global_batch_size * num_blocks)
-            offset = offset.view(batch_size, num_blocks)
-            _eps_t = (_eps_t / (global_batch_size * num_blocks) + offset) % 1
+            offset = (
+                torch.arange(
+                    start=t_index[0],
+                    end=t_index[1],
+                    device=device,
+                )
+                / global_batch_size
+            )
+            _eps_t = (_eps_t / global_batch_size + offset) % 1
         t = (1 - self.sampling_eps) * _eps_t + self.sampling_eps
         if self.restricted_t_range is not None:
             low, high = self.restricted_t_range
@@ -101,16 +122,25 @@ class DenoisingCollator:
         batch = self.base_collate_fn(features)
         batch_size = batch["input_ids"].shape[0]
         global_batch_size = self._world_size * batch_size
-        t_index = (  # index t's for the given device (used for antithetic_sampling
-            self._rank * batch_size,
-            min((self._rank + 1) * batch_size, global_batch_size),
-        )
-        t = self._sample_t(
-            global_batch_size=global_batch_size,
-            batch_size=batch_size,
-            t_index=t_index,
-            device=batch["input_ids"].device,
-        )
+        if self._presampled_t is not None:
+            indices = batch.pop("index", None)
+            if indices is None:
+                raise ValueError(
+                    "Dataset must provide indices to be compatible with using "
+                    "pre-sampled timesteps."
+                )
+            t = self._presampled_t[indices].to(batch["input_ids"].device)
+        else:
+            t_index = (  # index t's for the given device (used for antithetic_sampling)
+                self._rank * batch_size,
+                min((self._rank + 1) * batch_size, global_batch_size),
+            )
+            t = self._sample_t(
+                global_batch_size=global_batch_size,
+                batch_size=batch_size,
+                t_index=t_index,
+                device=batch["input_ids"].device,
+            )
         if all([c is not None for c in context_mask]):
             context_mask = torch.nn.utils.rnn.pad_sequence(
                 context_mask,  # type: ignore

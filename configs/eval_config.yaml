@@ -7,7 +7,7 @@ defaults:
   - _self_
 
 task: ???  # Set with CLI, e.g., `+eval/lm_eval_harness@task=gsm8k`
-seed: 1234
+seed: 1
 pretrained_model_name_or_path: ???
 pretrained_model_revision: null
 output_path: ???  # Where to save metrics

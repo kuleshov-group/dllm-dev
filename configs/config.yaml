@@ -27,10 +27,14 @@ train_dataloader:
   num_workers: ${eval:"len(__import__('os').sched_getaffinity(0))"}
   pin_memory: True
 
+eval_evaluator:
+  _target_: composer.core.evaluator.Evaluator
+  label: 'eval'
+  device_eval_microbatch_size: ${eval:${composer.trainer.device_train_microbatch_size}*2}
+
 eval_dataloader:
   _target_: torch.utils.data.DataLoader
-  # Note: batch_size is **per device** (if grad_accum is used, reduce size to avoid OOM)
-  batch_size: ${eval:${div_up:${div_up:${training.global_batch_size}, ${get_world_size:}}, ${training.grad_accum}}*2}
+  batch_size: ${eval:${train_dataloader.batch_size}*2}
   num_workers: ${train_dataloader.num_workers}
   pin_memory: ${train_dataloader.pin_memory}
 
@@ -42,7 +46,7 @@ training:
   global_batch_size: 512
   grad_accum: 1
   # Parameters for sampling t
-  antithetic_sampling: True
+  antithetic_sampling: true  # Disable for datasets that have prompt / context
   sampling_eps: 1e-3
   restricted_t_range: null  # Set to tuple of floats in range [0, 1] to bias sampling
   compile_backbone: false
