@@ -1,11 +1,11 @@
 hf_compatible_checkpointing:
   _target_: src.custom_composer.callbacks.HuggingFaceCompatibleCheckpointing
-  folder: ${composer.trainer.save_folder}
-  filename: ${composer.trainer.save_filename}
-  latest_filename: ${composer.trainer.save_latest_filename}
-  save_interval: ${composer.trainer.save_interval}
-  num_checkpoints_to_keep: ${composer.trainer.save_num_checkpoints_to_keep}
-  overwrite: ${composer.trainer.save_overwrite}
+  folder: ${checkpointing.save_dir}
+  filename: 'ep{epoch}-ba{batch}-rank{rank}.pt'
+  latest_filename: 'latest-rank{rank}.pt'
+  save_interval: '100000ba'
+  num_checkpoints_to_keep: -1
+  overwrite: false
   disable_hf: false
   save_local: true
   save_to_hub: true
