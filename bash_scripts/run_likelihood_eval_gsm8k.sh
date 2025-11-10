@@ -3,8 +3,7 @@
 cd ../ || exit  # Go to the root directory of the repo
 source setup_env.sh
 
-#MODEL_PATH="kuleshov-group/e2d2-gsm8k-finetune-Qwen3-2B"
-MODEL_PATH="/share/kuleshov/yzs2/runs/dllm-dev/gsm8k-0shot_block4_lr1e-5_bsz1_warm100ba_alphaf0.5_max-dur30000ba_amp_bf16_enc28_TOPdec14_e2d2_debug_v19_tie-weights"
+MODEL_PATH="kuleshov-group/e2d2-gsm8k-finetune-Qwen3-2B"
 # MODEL_PATH="outputs/<PATH_TO_SAVED_MODEL_DIR>"
 REVISION=null
 
