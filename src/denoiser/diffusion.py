@@ -449,9 +449,6 @@ class MDLM(Denoiser):
                 xs,
             )
         elif generation_config.sampling_strategy == "predict_and_noise":
-            assert self.config.diffusion_type == "absorbing", (
-                "predict_and_noise decoding strategy only supports absorbing diffusion."
-            )
             # assert (
             #     abs((x_theta.sum() / prob_check_denom).item() - 1.0) < 1e-6
             # ), "Denoising output probabilities not summing to 1."
@@ -512,10 +509,11 @@ class MDLM(Denoiser):
         batch_size: Optional[int] = None,
         device: Optional[str] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
-        disable_pbar: bool = False,
         **kwargs: Any,
     ) -> torch.LongTensor:
         # Setup sampling variables
+        rank = torch.distributed.get_rank()
+        disable_pbar = rank != 0
         if generation_config is None:
             assert getattr(self, "generation_config", None) is not None, (
                 "Generation config must be provided if not present in the model."
@@ -1504,7 +1502,6 @@ class AnyOrderBD3LM(BD3LM):
         )
         xt = torch.cat((input_ids, xt), dim=-1)
         position_ids = torch.arange(input_ids.shape[1], device=input_ids.device)[None, :].repeat(batch_size, 2).to(input_ids.device)
-        import ipdb ; ipdb.set_trace()
         return DenoiserInput(
             xt=xt,  # type: ignore
             x0=input_ids,
@@ -1584,9 +1581,10 @@ class AnyOrderBD3LM(BD3LM):
         batch_size: int | None = None,
         device: str | None = None,
         tokenizer: PreTrainedTokenizer | None = None,
-        disable_pbar: bool = False,
         **kwargs: Any,
     ) -> torch.LongTensor:
+        rank = torch.distributed.get_rank()
+        disable_pbar = rank != 0
         assert generation_config.use_cache, (
             "Generation with AO-ARM requires use_cache=True."
         )

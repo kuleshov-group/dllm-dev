@@ -55,7 +55,9 @@ OUTPUT_PATH="${OUTPUT_DIR}/L-${L}-block_size-${BLOCK_SIZE}-do_sample-${DO_SAMPLE
 OUTPUT_PATH="${OUTPUT_DIR}/ema${USE_EMA}_ckpt${CKPT}_${NUM_FEW_SHOT}shot_L${L}_block${BLOCK_SIZE}-do_sample${DO_SAMPLE}-sampling_strategy${SAMPLING_STRATEGY}-T${T}_first_hit${FIRST_HITTING}-conf_noise${CONFIDENCE_BASED_NOISING}-conf_margin_noise${CONFIDENCE_MARGIN_BASED_NOISING}-conf_thold${CONFIDENCE_THRESHOLD}-align_to_blocks${ALIGN_INPUTS_TO_BLOCKS}"
 mkdir -p ${OUTPUT_PATH}
 
-accelerate launch scripts/eval/harness_eval.py \
+PORT=29501
+
+torchrun --nproc_per_node ${NUM_VISIBLE_DEVICES} --master_port=${PORT} scripts/eval/harness_eval.py \
   hydra.output_subdir=null \
   hydra.run.dir="${PWD}" \
   hydra/job_logging=disabled \
@@ -70,6 +72,7 @@ accelerate launch scripts/eval/harness_eval.py \
   output_path=${OUTPUT_PATH} \
   generated_samples_output_path=${OUTPUT_PATH} \
   max_new_tokens=${L} \
+  max_length=${L} \
   block_size=${BLOCK_SIZE} \
   generation_config.do_sample=${DO_SAMPLE} \
   generation_config.sampling_strategy=${SAMPLING_STRATEGY} \

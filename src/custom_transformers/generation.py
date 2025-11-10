@@ -32,10 +32,10 @@ class HydraCompatibleStoppingCriteriaList(StoppingCriteriaList):
 
 
 class RegexStoppingCriteria(StoppingCriteria):
-    def __init__(self, tokenizer, pattern):
+    def __init__(self, tokenizer, pattern, threshold_for_matching=1):
         self.tokenizer = tokenizer
         self.pattern = pattern
-        assert (self.tokenizer.eos_token_id == self.tokenizer.bos_token_id) or self.tokenizer.bos_token_id is None, "Assumes EOS and BOS are the same token"
+        self.threshold_for_matching = threshold_for_matching
 
     def __call__(
         self, input_ids: torch.LongTensor, scores: None | torch.FloatTensor, **kwargs
@@ -46,7 +46,6 @@ class RegexStoppingCriteria(StoppingCriteria):
         if input_ids.ndim == 1:
             input_ids = input_ids.unsqueeze(0)
         for i in range(input_ids.shape[0]):
-            prompt_offset = torch.where(input_ids[i] == self.tokenizer.eos_token_id)[0][1] + 1
-            text = self.tokenizer.decode(input_ids[i][prompt_offset:])
-            matches.append(len(re.findall(self.pattern, text)) > 0)
+            text = self.tokenizer.decode(input_ids[i])
+            matches.append(len(re.findall(self.pattern, text)) >= self.threshold_for_matching)
         return torch.tensor(matches, device=input_ids.device, dtype=torch.bool)

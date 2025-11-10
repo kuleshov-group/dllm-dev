@@ -134,7 +134,6 @@ class AR(Denoiser):
         batch_size: Optional[int] = None,
         device: Optional[str] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
-        disable_pbar: Optional[bool] = None,  # not used; compat. w/other denoisers
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         outputs = self.backbone.model.generate(

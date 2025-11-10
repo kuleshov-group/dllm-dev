@@ -6,7 +6,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, List, Tuple
+from typing import Any, List, Tuple, Dict
 
 import accelerate
 import hydra
@@ -48,6 +48,7 @@ class LMEvalHarnessModel(LM):
         throughput_samples: int = 100,
         throughput_warmup: int = 100,
         model_config_overrides: dict[str, Any] | None = None,
+        system_instruction: str = "Please reason step by step, and put your final answer within $\\boxed{}$.",
     ):
         """
         Args:
@@ -64,6 +65,7 @@ class LMEvalHarnessModel(LM):
                 arguments, which is not compatible in our hydra framework.
             throughput_run (bool): Whether to run the evaluation throughput.
             model_config_overrides (dict[str, Any]): Model config overrides.
+            system_instruction (str): System instruction to include in chat template messages.
         """
         super().__init__()
         self.generated_samples_output_path = generated_samples_output_path
@@ -113,6 +115,19 @@ class LMEvalHarnessModel(LM):
         self.throughput_run = throughput_run
         self.throughput_warmup = throughput_warmup
         self.throughput_samples = throughput_samples
+        self.system_instruction = system_instruction
+        
+        # Check if tokenizer supports chat templates
+        if not hasattr(self.tokenizer, 'apply_chat_template'):
+            raise ValueError("use_chat_template=True but tokenizer does not support chat templates")
+        if self.tokenizer.chat_template is None:
+            raise ValueError(
+                f"use_chat_template=True but tokenizer '{self.tokenizer.name_or_path}' does not have a chat_template set. "
+                f"Please either:\n"
+                f"  1. Use a tokenizer that has a chat_template\n"
+                f"  2. Manually set tokenizer.chat_template\n"
+                f"  3. Set use_chat_template=False"
+            )
 
     @property
     def rank(self):
@@ -128,30 +143,70 @@ class LMEvalHarnessModel(LM):
     def loglikelihood_rolling(self, requests) -> List[float]:
         raise NotImplementedError
 
+    @property
+    def tokenizer_name(self):
+        return self.tokenizer.name_or_path
+
+    def apply_chat_template(self, chat_history: List[Dict[str, str]], add_generation_prompt: bool = True):
+        return self.tokenizer.apply_chat_template(
+            chat_history,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        )
+
     def generate_until(self, requests, **generation_kwargs):
-        # TODO: Move this to utils file / perhaps use chat template
-        def _tokenize(
-            e,
-            prefix_text: str | None = (
-                f"{self.tokenizer.bos_token}Please reason step by step, and put your "
-                + "final answer within $\\boxed{}$. "
-            ),
-        ):
-            ctx = e["prefix"]
-            ctx = re.sub(
-                r"^####\s*(\d+)\s*$",
-                r"$\\boxed{\1}$" + self.tokenizer.eos_token,
-                ctx,
-                flags=re.MULTILINE,
-            )
-            ctx = ctx.replace("Question: ", prefix_text)
-            ctx = ctx.replace("\nAnswer:", f"{self.tokenizer.eos_token}Answer:")
-            prefix_tokens = self.tokenizer(ctx)["input_ids"]
-            return {
-                "prefix_text": ctx,
-                "prefix": prefix_tokens,
-                "target": e["target"],
-            }
+        def _tokenize(e):
+            if self.tokenizer.chat_template is not None:
+                # Use chat template format
+                ctx = e["prefix"]
+                
+                # Extract question part (before "Answer:" if it exists)
+                if "\nAnswer:" in ctx:
+                    question_part = ctx.split("\nAnswer:")[0]
+                else:
+                    question_part = ctx
+                
+                # Remove "Question: " prefix if present
+                if question_part.startswith("Question: "):
+                    question_text = question_part.replace("Question: ", "", 1)
+                else:
+                    question_text = question_part
+                
+                # Build messages list
+                messages = []
+                
+                # Add user message with instruction and question
+                messages.append({"role": "user", "content": self.system_instruction + question_text})
+                
+                # Apply chat template
+                ctx = self.apply_chat_template(messages)
+                
+                # Tokenize the formatted context
+                prefix_tokens = self.tokenizer(ctx)["input_ids"]
+                
+                return {
+                    "prefix_text": ctx,
+                    "prefix": prefix_tokens,
+                    "target": e["target"],
+                }
+            else:
+                # Original manual formatting
+                prefix_text = self.tokenizer.bos_token + self.system_instruction
+                ctx = e["prefix"]
+                ctx = re.sub(
+                    r"^####\s*(\d+)\s*$",
+                    r"$\\boxed{\1}$" + self.tokenizer.eos_token,
+                    ctx,
+                    flags=re.MULTILINE,
+                )
+                ctx = ctx.replace("Question: ", prefix_text)
+                ctx = ctx.replace("\nAnswer:", f"{self.tokenizer.eos_token}Answer:")
+                prefix_tokens = self.tokenizer(ctx)["input_ids"]
+                return {
+                    "prefix_text": ctx,
+                    "prefix": prefix_tokens,
+                    "target": e["target"],
+                }
 
         ds = [{"prefix": req.args[0], "target": req.args[1]} for req in requests]
         ds = Dataset.from_list(ds)
@@ -190,7 +245,6 @@ class LMEvalHarnessModel(LM):
                 start_event, end_event = None, None
             sample = self.model.generate(
                 inputs=elem["prefix"][None, ...].to(self.device),
-                disable_pbar=(self.rank != 0),
                 # tokenizer=self.tokenizer,  # Uncomment for debugging
                 **self.gen_kwargs,
             )

@@ -8,7 +8,6 @@ batch_size: 1
 #  output_path: ${output_path}
 log_samples: true
 system_instruction: null  # TODO: Can we use this instead of tokenizer
-apply_chat_template: false  # TODO: Can we use this instead of tokenizer
 random_seed: ${seed}
 numpy_random_seed: ${.random_seed}
 torch_random_seed: ${.random_seed}
