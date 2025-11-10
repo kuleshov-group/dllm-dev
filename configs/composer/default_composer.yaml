@@ -4,12 +4,13 @@ defaults:
   - algorithms:
     - ema
     - gradient_clipping
+    - set_fixed_rng_state_for_eval
   - callbacks:
-      - hf_compatible_checkpointing
-      - lr_monitor
       - runtime_estimator
-      - save_best_checkpointing
+      - lr_monitor
       - speed_monitor
+      - hf_compatible_checkpointing
+      - save_best_checkpointing
   - loggers: wandb
   - lr_scheduler: constant_with_warmup
   - optimizer: decoupled_adamw

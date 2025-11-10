@@ -1,0 +1,3 @@
+set_fixed_rng_state_for_eval:
+  _target_: src.custom_composer.algorithms.SetFixedRngStateForEval
+  seed: ${seed}
