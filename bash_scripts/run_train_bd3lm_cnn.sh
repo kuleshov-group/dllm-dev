@@ -6,7 +6,6 @@ source setup_env.sh
 
 # Model arch
 BLOCK_SIZE=8
-EVAL_BLOCK_SIZE=8
 HIDDEN_SIZE=256
 INTERMEDIATE_SIZE=768
 N_LAYERS=12
@@ -57,7 +56,6 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   training.global_batch_size=${BATCH_SIZE} \
   training.grad_accum=$(( BATCH_SIZE / NUM_VISIBLE_DEVICES / MICRO_BATCH_SIZE )) \
   block_size=${BLOCK_SIZE} \
-  eval_block_size=${EVAL_BLOCK_SIZE} \
   training.antithetic_sampling=false \
   hydra.run.dir=${RUN_DIR}/${RUN_NAME} \
   composer.trainer.save_interval="1000ba" \

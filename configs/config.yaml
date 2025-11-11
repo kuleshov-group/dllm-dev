@@ -18,7 +18,6 @@ seed: 1
 backend: ${set_backend:}
 pretrained_model_name_or_path: null  # Use for pretrained backbones
 block_size: null  # Use for BD3LMs
-eval_block_size: ${block_size} # Use for BD3LMs
 
 train_dataloader:
   _target_: torch.utils.data.DataLoader

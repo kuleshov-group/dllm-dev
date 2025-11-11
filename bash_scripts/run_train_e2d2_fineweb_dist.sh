@@ -22,7 +22,6 @@ GRAD_ACCUM=$(( MACRO_BATCH_SIZE / MICRO_BATCH_SIZE ))
 
 # Set constant hyperparameters (fixed during hyperparam sweep)
 BLOCK_SIZE=8
-EVAL_BLOCK_SIZE=8
 HIDDEN_SIZE=512
 INTERMEDIATE_SIZE=$(( 4 * HIDDEN_SIZE ))
 N_ENCODER_LAYERS=20
@@ -99,7 +98,6 @@ composer scripts/composer_scripts/train_discrete_denoiser.py \
   training.grad_accum=${GRAD_ACCUM} \
   ~composer.trainer.compile_config \
   block_size=${BLOCK_SIZE} \
-  eval_block_size=${EVAL_BLOCK_SIZE} \
   training.antithetic_sampling=false \
   hydra.run.dir=${RUN_DIR}/${RUN_NAME} \
   composer.trainer.save_interval="1000ba" \
