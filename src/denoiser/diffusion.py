@@ -157,14 +157,21 @@ class MDLM(Denoiser):
         self.neg_infinity = -1e12
 
     def _create_static_mask(self) -> None:
-        static_mask = torch.ones(
-            self.config.length, self.config.length, dtype=torch.bool
-        )
+        static_mask = self.generate_static_mask()
         self.register_buffer(
             "static_attention_mask",
             static_mask,
         )
         self.skip_params_for_push.append("static_attention_mask")
+
+    def generate_static_mask(self) -> torch.Tensor:
+        static_mask = torch.ones(
+            self.config.length, self.config.length, dtype=torch.bool
+        )
+        return static_mask
+
+    def update_static_mask(self, new_static_mask: torch.Tensor) -> None:
+        self.static_attention_mask.copy_(new_static_mask)
 
     def _sample_q_xt(
         self,
@@ -317,7 +324,7 @@ class MDLM(Denoiser):
         **kwargs: Any,
     ) -> LossAndNllOutput:
         log_p_theta = torch.gather(
-            input=model_output, dim=-1, index=denoiser_inputs.x0[:, :, None]
+            input=model_output, dim=-1, index=denoiser_inputs.x0[..., None]
         ).squeeze(-1)
         nlls = (
             log_p_theta
@@ -342,7 +349,6 @@ class MDLM(Denoiser):
     def _compute_posterior(
         self,
         x: Union[torch.FloatTensor, torch.LongTensor],
-        xt: torch.LongTensor,
         alpha_t: torch.FloatTensor,
         alpha_s: torch.FloatTensor,
     ) -> torch.FloatTensor:
@@ -352,7 +358,6 @@ class MDLM(Denoiser):
 
         Args:
             x (Tensor): True (one-hot) / predicted clean signal (B, L, V).
-            xt (Tensor): Noised signal at time t (B, L).
             alpha_t (Tensor): Noise schedule parameter at time t (B, 1, 1).
             alpha_s (Tensor): Noise schedule parameter at time s (B, 1, 1).
         """
@@ -410,7 +415,7 @@ class MDLM(Denoiser):
             ):
                 backbone_output = self._backbone_forward(
                     denoiser_inputs,
-                    fix_cache_length=True,  # Do not let kv cache grow on each forward call
+                    fix_cache_length=True,  # Do not let kv cache grow on each forward
                     **cache,
                     **kwargs,
                 )
@@ -434,9 +439,7 @@ class MDLM(Denoiser):
         model_output_cache = {"x_theta": x_theta}
         prob_check_denom = denoiser_inputs.xt.numel()
         if generation_config.sampling_strategy == "posterior":
-            q_xs = self._compute_posterior(
-                x_theta, denoiser_inputs.xt, alpha_t, alpha_s
-            )
+            q_xs = self._compute_posterior(x_theta, alpha_t, alpha_s)
 
             assert abs((q_xs.sum() / prob_check_denom).item() - 1.0) < 1e-6, (
                 "Posterior probabilities not summing to 1."
@@ -680,14 +683,10 @@ class BD3LMConfig(MDLMConfig):
     def __init__(
         self,
         block_size: Optional[int] = None,
-        eval_block_size: Optional[int] = None,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.block_size = block_size
-        self.eval_block_size = (
-            eval_block_size if eval_block_size is not None else block_size
-        )
 
 
 class BD3LM(MDLM):
@@ -734,37 +733,50 @@ class BD3LM(MDLM):
         return block_diagonal | offset_block_causal | block_causal
 
     def _create_static_mask(self) -> None:
-        if self.config.attn_backend == "sdpa":
-            static_mask = self._block_mask(
-                b=None,
-                h=None,
-                q_idx=torch.arange(self.config.length * 2)[:, None],
-                kv_idx=torch.arange(self.config.length * 2)[None, :],
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
-                seq_length=self.config.length,
-            )
+        static_mask = self.generate_static_mask()
+        if self.config.attn_backend == "flex_attention":
+            self.static_attention_mask = static_mask
+        else:
             self.register_buffer(
                 "static_attention_mask",
                 static_mask,
             )
             self.skip_params_for_push.append("static_attention_mask")
-        elif self.config.attn_backend == "flex_attention":
+
+    def generate_static_mask(self) -> Union[torch.Tensor, BlockMask]:
+        if self.config.attn_backend == "flex_attention":
             mask = partial(
                 self._block_mask,
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
+                block_size=self.config.block_size,
                 seq_length=self.config.length,
             )
-            self.static_attention_mask = create_block_mask(
+            return create_block_mask(
                 mask,
                 B=None,
                 H=None,
                 Q_LEN=self.config.length * 2,
                 KV_LEN=self.config.length * 2,
             )
+        else:
+            static_mask = self._block_mask(
+                b=None,
+                h=None,
+                q_idx=torch.arange(self.config.length * 2)[:, None],
+                kv_idx=torch.arange(self.config.length * 2)[None, :],
+                block_size=self.config.block_size,
+                seq_length=self.config.length,
+            )
+            return static_mask
+
+    def update_static_mask(
+        self,
+        new_static_mask: Union[torch.Tensor, BlockMask],
+    ) -> None:
+        if self.config.attn_backend == "flex_attention":
+            self.static_attention_mask.copy_(new_static_mask)
+        else:
+            # noinspection PyAttributeOutsideInit
+            self.static_attention_mask = new_static_mask
 
     def _ensure_no_unmasked_blocks(
         self,
@@ -821,14 +833,10 @@ class BD3LM(MDLM):
         if t is None:
             t = torch.rand(
                 input_ids.shape[0],
-                input_ids.shape[1] // self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
+                input_ids.shape[1] // self.config.block_size,
                 device=input_ids.device,
             ).repeat_interleave(
-                self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
+                self.config.block_size,
                 dim=-1,
             )
         alpha_t, alpha_t_prime = self.noise_schedule(t)
@@ -862,13 +870,7 @@ class BD3LM(MDLM):
                     attention_mask.bool().repeat(2, 2).bool()
                 )
                 dec_masks = [
-                    partial(
-                        self._block_mask,
-                        block_size=self.config.block_size
-                        if self.training
-                        else self.config.eval_block_size,
-                        seq_length=self.config.length,
-                    ),
+                    partial(self._block_mask, block_size=self.config.block_size),
                     padding_mask,
                 ]
                 decoder_attention_mask = create_block_mask(
@@ -1044,56 +1046,11 @@ class E2D2(BD3LM):
         return block_diagonal | offset_block_causal
 
     def _create_static_mask(self) -> None:
+        encoder_static_mask, decoder_static_mask = self.generate_static_mask()
         if self.config.attn_backend == "flex_attention":
-            enc_mask = partial(
-                self._encoder_block_mask,
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
-            )
-            encoder_attention_mask = create_block_mask(
-                enc_mask,
-                B=None,
-                H=None,
-                Q_LEN=self.config.length,
-                KV_LEN=self.config.length,
-            )
-            dec_mask = partial(
-                self._decoder_block_mask,
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
-                seq_length=self.config.length,
-            )
-            decoder_attention_mask = create_block_mask(
-                dec_mask,
-                B=None,
-                H=None,
-                Q_LEN=self.config.length,
-                KV_LEN=self.config.length * 2,
-            )
-            self.encoder_static_attention_mask = encoder_attention_mask
-            self.static_attention_mask = decoder_attention_mask
+            self.encoder_static_attention_mask = encoder_static_mask
+            self.static_attention_mask = decoder_static_mask
         else:
-            encoder_static_mask = self._encoder_block_mask(
-                b=None,  # type: ignore
-                h=None,  # type: ignore
-                q_idx=torch.arange(self.config.length)[:, None],
-                kv_idx=torch.arange(self.config.length)[None, :],
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
-            )
-            decoder_static_mask = self._decoder_block_mask(
-                b=None,
-                h=None,
-                q_idx=torch.arange(self.config.length)[:, None],
-                kv_idx=torch.arange(self.config.length * 2)[None, :],
-                block_size=self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
-                seq_length=self.config.length,
-            )
             self.register_buffer(
                 "encoder_static_attention_mask",
                 encoder_static_mask,
@@ -1104,6 +1061,63 @@ class E2D2(BD3LM):
             )
             self.skip_params_for_push.append("encoder_static_attention_mask")
             self.skip_params_for_push.append("static_attention_mask")
+
+    def generate_static_mask(self) -> Tuple[Union[torch.Tensor, BlockMask], ...]:
+        if self.config.attn_backend == "flex_attention":
+            enc_mask = partial(
+                self._encoder_block_mask,
+                block_size=self.config.block_size,
+            )
+            encoder_static_mask = create_block_mask(
+                enc_mask,
+                B=None,
+                H=None,
+                Q_LEN=self.config.length,
+                KV_LEN=self.config.length,
+            )
+            dec_mask = partial(
+                self._decoder_block_mask,
+                block_size=self.config.block_size,
+                seq_length=self.config.length,
+            )
+            decoder_static_mask = create_block_mask(
+                dec_mask,
+                B=None,
+                H=None,
+                Q_LEN=self.config.length,
+                KV_LEN=self.config.length * 2,
+            )
+
+        else:
+            encoder_static_mask = self._encoder_block_mask(
+                b=None,  # type: ignore
+                h=None,  # type: ignore
+                q_idx=torch.arange(self.config.length)[:, None],
+                kv_idx=torch.arange(self.config.length)[None, :],
+                block_size=self.config.block_size,
+            )
+            decoder_static_mask = self._decoder_block_mask(
+                b=None,
+                h=None,
+                q_idx=torch.arange(self.config.length)[:, None],
+                kv_idx=torch.arange(self.config.length * 2)[None, :],
+                block_size=self.config.block_size,
+                seq_length=self.config.length,
+            )
+        return encoder_static_mask, decoder_static_mask
+
+    def update_static_mask(
+        self,
+        new_static_mask: Tuple[Union[torch.Tensor, BlockMask], ...],
+    ) -> None:
+        if self.config.attn_backend == "flex_attention":
+            # noinspection PyAttributeOutsideInit
+            self.encoder_static_attention_mask = new_static_mask[0]
+            # noinspection PyAttributeOutsideInit
+            self.static_attention_mask = new_static_mask[1]
+        else:
+            self.encoder_static_attention_mask.copy_(new_static_mask[0])
+            self.static_attention_mask.copy_(new_static_mask[1])
 
     def _prepare_inputs(
         self,
@@ -1125,14 +1139,10 @@ class E2D2(BD3LM):
         if t is None:
             t = torch.rand(
                 input_ids.shape[0],
-                input_ids.shape[1] // self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
+                input_ids.shape[1] // self.config.block_size,
                 device=input_ids.device,
             ).repeat_interleave(
-                self.config.block_size
-                if self.training
-                else self.config.eval_block_size,
+                self.config.block_size,
                 dim=-1,
             )
         alpha_t, alpha_t_prime = self.noise_schedule(t)
@@ -1168,7 +1178,6 @@ class E2D2(BD3LM):
                 decoder_attention_mask, dtype=torch.float
             )
         elif self.config.attn_backend == "flex_attention":
-            # TODO enable bidirectional attention on context for seq2seq tasks
             if context_mask.any():
                 raise NotImplementedError(
                     "flex_attention with context_mask not implemented yet."
@@ -1179,9 +1188,7 @@ class E2D2(BD3LM):
                 enc_masks = [
                     partial(
                         self._encoder_block_mask,
-                        block_size=self.config.block_size
-                        if self.training
-                        else self.config.eval_block_size,
+                        block_size=self.config.block_size,
                     ),
                     padding_mask,
                 ]
@@ -1195,9 +1202,7 @@ class E2D2(BD3LM):
                 dec_masks = [
                     partial(
                         self._decoder_block_mask,
-                        block_size=self.config.block_size
-                        if self.training
-                        else self.config.eval_block_size,
+                        block_size=self.config.block_size,
                         seq_length=input_ids.shape[1],
                     ),
                     dec_padding_mask,
