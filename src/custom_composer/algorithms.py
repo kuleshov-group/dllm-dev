@@ -100,6 +100,9 @@ class BlockSizeAnnealing(Algorithm):
         return current_block_size * self.factor
 
     def match(self, event: Event, state: State) -> bool:
+        if event == Event.AFTER_LOAD:
+            return True
+
         if event not in [Event.BATCH_END, Event.EPOCH_END]:
             return False
         if hasattr(state.model, "module"):
@@ -144,10 +147,6 @@ class BlockSizeAnnealing(Algorithm):
             log.info(f"Restored block size value to {self.current_block_size}.")
             return
 
-        log.info(
-            f"Increasing block size: "
-            f"{'+' if self.increase_via_add_or_multiply == 'add' else '*'}{self.factor}"
-        )
         # TODO: Will this work with FSDP?
         if hasattr(state.model, "module"):
             new_block_size = self._increase_block_size(
@@ -157,9 +156,6 @@ class BlockSizeAnnealing(Algorithm):
             state.model.module.model.update_static_mask(
                 state.model.module.model.generate_static_mask()
             )
-            log.info(
-                f"New block size set to {state.model.module.model.config.block_size}"
-            )
         else:
             new_block_size = self._increase_block_size(
                 state.model.model.config.block_size
@@ -168,7 +164,9 @@ class BlockSizeAnnealing(Algorithm):
             state.model.model.update_static_mask(
                 state.model.model.generate_static_mask()
             )
-        log.info(f"New block size set to {new_block_size}")
+        log.info(
+            f"Block size updated from {self.current_block_size} set to {new_block_size}"
+        )
         self.current_block_size = new_block_size
 
     def state_dict(self) -> dict[str, Any]:
