@@ -420,6 +420,15 @@ class LogSampledTimestep(Callback):
         )
 
 
+class LogBlockSize(Callback):
+    def batch_end(self, state: State, logger: Logger) -> None:
+        if hasattr(state.model, "module"):
+            block_size = state.model.module.model.config.block_size
+        else:
+            block_size = state.model.model.config.block_size
+        logger.log_metrics({"block_size": block_size})
+
+
 class LogGradientNorms(Callback):
     """Log gradient norms of non-embedding parameters.
 
