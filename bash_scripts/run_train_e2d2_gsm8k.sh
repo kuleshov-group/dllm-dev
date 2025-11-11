@@ -5,7 +5,7 @@ cd ../ || exit  # Go to the root directory of the repo
 source setup_env.sh
 
 # Model arch
-BLOCK_SIZE=1
+BLOCK_SIZE=4
 N_ENCODER_LAYERS=28
 ENCODER_TOP_LAYERS=false
 N_DECODER_LAYERS=14
