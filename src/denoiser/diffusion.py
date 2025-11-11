@@ -512,7 +512,6 @@ class MDLM(Denoiser):
         batch_size: Optional[int] = None,
         device: Optional[str] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
-        disable_pbar: bool = False,
         **kwargs: Any,
     ) -> torch.LongTensor:
         # Setup sampling variables
@@ -539,6 +538,7 @@ class MDLM(Denoiser):
             device = "cuda" if torch.cuda.is_available() else "cpu"
         block_size = generation_config.block_size
         max_blocks = max_new_tokens // block_size
+        disable_pbar = torch.distributed.get_rank() != 0
 
         # Sample max generation length tensor from prior
         accumulated_samples = self.mask_token_id * torch.ones(
@@ -652,7 +652,7 @@ class MDLM(Denoiser):
                 is_done = stopping_criteria(
                     input_ids=accumulated_samples[  # type: ignore
                         :,
-                        inputs_offset : inputs_offset + ((block_id + 1) * block_size),
+                        : inputs_offset + ((block_id + 1) * block_size),
                     ],
                     scores=None,  # type: ignore
                 )
