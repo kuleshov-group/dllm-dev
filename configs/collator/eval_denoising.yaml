@@ -3,5 +3,5 @@ defaults:
   - _self_
 
 block_size: ${eval_block_size}
-# Disable; this would make reproducibility per_device_batch_size dependent
-antithetic_sampling: false
+# Used to ensure reproducible validation results; independent of per device batch size
+presample_t: true

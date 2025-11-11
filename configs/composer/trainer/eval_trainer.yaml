@@ -4,8 +4,8 @@ run_name: null
 seed: ${seed}
 device: ${backend}
 eval_subset_num_batches: -1
-progress_bar: true
-log_to_console: false
+progress_bar: false
+log_to_console: true
 precision: 'amp_bf16'
 save_folder: null
 load_path: null

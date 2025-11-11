@@ -1,9 +1,23 @@
 defaults:
+  - /collator: eval_denoising
   - _self_
 load_ema_weights: true
 ckpt_file: 'best-rank0.pt'  # best-rank0.pt or latest-rank0.pt
+
+collator:
+  antithetic_sampling: false
+  restricted_t_range: null
+  max_length: null
+  sampling_eps: 1e-3
+
 eval_dataloader:
   _target_: torch.utils.data.DataLoader
   batch_size: ${div_up:${batch_size}, ${get_world_size:}}
   num_workers: 0
   pin_memory: true
+
+eval_evaluator:
+  _target_: composer.core.evaluator.Evaluator
+  label: 'eval'
+  # Override this, if full batch causing OOM
+  device_eval_microbatch_size: ${task.eval_dataloader.batch_size}

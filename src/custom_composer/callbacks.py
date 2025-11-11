@@ -32,6 +32,11 @@ class DataloaderSpeedMonitor(Callback):
         License: Apache-2.0
     """  # noqa: E501
 
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.batch_start_time: float = 0
+        self.batch_serve_time: float = 0
+
     def before_dataloader(self, state: State, logger: Logger) -> None:
         del logger  # unused
         self.batch_start_time = time.time_ns()
@@ -97,7 +102,6 @@ class HuggingFaceCompatibleCheckpointing(CheckpointSaver):
             timestamp,
         ) in self.all_saved_hf_checkpoints_to_timestamp.items():
             all_hf_checkpoints.append((save_filename, timestamp.state_dict()))
-
         state_dict["all_saved_hf_checkpoints_to_timestamp"] = all_hf_checkpoints
         return state_dict
 

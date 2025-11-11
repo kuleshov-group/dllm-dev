@@ -17,26 +17,21 @@ for EVAL_DATASET in "owt_eval_gpt2" "ptb_eval" "wikitext2_eval" "lm1b_eval" "lam
   composer -n ${NUM_VISIBLE_DEVICES} scripts/eval/likelihood_eval.py \
     hydra.output_subdir=null \
     hydra.run.dir="${PWD}" \
-    hydra/job_logging=disabled \
-    hydra/hydra_logging=disabled \
+    hydra/job_logging=none \
+    hydra/hydra_logging=none \
     +eval@task=likelihood \
     +dataset@task.eval_dataset=${EVAL_DATASET} \
     task.load_ema_weights=${USE_EMA} \
     task.ckpt_file=${CKPT_FILE} \
-    seed=1 \
     batch_size=${BATCH_SIZE} \
     block_size=${BLOCK_SIZE} \
-    task.eval_dataloader.batch_size=8 \
+    task.eval_dataloader.batch_size=${BATCH_SIZE} \
     pretrained_model_name_or_path=${MODEL_PATH} \
     pretrained_model_revision=${REVISION} \
     tokenizer.pretrained_model_name_or_path=${PRETRAINED_MODEL_NAME_OR_PATH} \
     output_path=null \
-    +collator@task.collator=denoising \
+    task.collator.block_size=${BLOCK_SIZE} \
     task.collator.global_batch_size=${BATCH_SIZE} \
-    task.collator.max_length=null \
-    task.collator.restricted_t_range=null \
-    task.collator.sampling_eps=1e-3 \
-    task.collator.antithetic_sampling=false \
     +metrics@task.metrics='[loss,nll,bpd,perplexity]' \
     +composer/trainer@task.trainer=eval_trainer \
     ~generation@generation_config \

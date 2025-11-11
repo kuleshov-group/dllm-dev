@@ -43,7 +43,7 @@ def main(cfg: DictConfig) -> None:
                 trust_remote_code=True,
                 revision=getattr(cfg, "pretrained_model_revision", None),
             )
-        except:  # Model not compatible with CausalLM
+        except:  # Model not compatible with CausalLM  # noqa: E722
             model = AutoModelForMaskedLM.from_pretrained(
                 cfg.pretrained_model_name_or_path,
                 trust_remote_code=True,
@@ -72,6 +72,7 @@ def main(cfg: DictConfig) -> None:
         world_size=dist.get_world_size(),
         tokenizer=tokenizer,
         max_length=model.config.length,
+        dataset_size=len(eval_dataset),
     )
     eval_sampler = (
         dist.get_sampler(eval_dataset, shuffle=False, drop_last=False)
@@ -86,23 +87,19 @@ def main(cfg: DictConfig) -> None:
         collate_fn=collator,
         sampler=eval_sampler,
     )
+    eval_evaluator = hydra.utils.instantiate(
+        cfg.task.eval_evaluator,
+        _convert_="partial",
+        dataloader=eval_dataloader,
+    )
 
     trainer = hydra.utils.instantiate(
         cfg.task.trainer,
         _convert_="all",
         model=model,
-        eval_dataloader=eval_dataloader,
+        eval_dataloader=eval_evaluator,
     )
     trainer.eval()
-    print(
-        "\nEval Metrics:\n\t"
-        + "\n\t".join(
-            [
-                f"{k}: {v.item():0.4f}"
-                for k, v in trainer.state.eval_metric_values.items()
-            ]
-        )
-    )
 
     if torch_dist.is_initialized():
         torch_dist.destroy_process_group()

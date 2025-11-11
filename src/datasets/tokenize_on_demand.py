@@ -125,6 +125,7 @@ class GSM8KDataset(Dataset):
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "context_mask": context_mask,
+            "index": idx,
         }
 
 

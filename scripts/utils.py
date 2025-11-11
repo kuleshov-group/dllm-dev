@@ -257,15 +257,20 @@ def load_model_from_ckpt_dir_path(
         for alg in ckpt["state"]["algorithms"]:
             # algorithms stored as list[tuple[str, dict]]
             if alg[0] == "EMA":
-                state_dict = alg[1]["ema_model"]["named_parameters_dict"]
+                if not alg[1]["ema_weights_active"] and alg[1]["ema_started"]:
+                    state_dict = alg[1]["ema_model"]["named_parameters_dict"]
+                # EMA weights are either already "in" model or ema was not yet initiated
+                else:
+                    state_dict = ckpt["state"]["model"]
                 break
-        torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
-            state_dict, "module."
-        )
         if state_dict is None:
             raise ValueError("EMA weights not found in checkpoint.")
     else:
         state_dict = ckpt["state"]["model"]
+    torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(
+        state_dict,
+        "module.",  # For FSDP
+    )
     _replace_in_state_dict_if_present(state_dict, "_orig_mod.")  # for compiled models
     torch.nn.modules.utils.consume_prefix_in_state_dict_if_present(state_dict, "model.")
     model.load_state_dict(state_dict, strict=False)

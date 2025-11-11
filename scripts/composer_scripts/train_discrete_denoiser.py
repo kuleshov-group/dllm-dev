@@ -66,12 +66,6 @@ def main(cfg: DictConfig) -> None:
         rank=dist.get_global_rank(),
         world_size=dist.get_world_size(),
     )
-    eval_collator = hydra.utils.instantiate(
-        cfg.eval_collator,
-        tokenizer=tokenizer,
-        rank=dist.get_global_rank(),
-        world_size=dist.get_world_size(),
-    )
 
     # Train dataloader
     train_dataset = hydra.utils.instantiate(
@@ -94,11 +88,19 @@ def main(cfg: DictConfig) -> None:
     # time.sleep(30)  # Needed for multi-node training
 
     # Val dataloader (optional)
-    if getattr(cfg, "eval_dataset", None) is not None:
+    if getattr(cfg, "eval_evaluator", None) is not None:
         eval_dataset = hydra.utils.instantiate(
             cfg.eval_dataset,
             tokenizer=tokenizer,
         )
+        eval_collator = hydra.utils.instantiate(
+            cfg.eval_collator,
+            tokenizer=tokenizer,
+            rank=dist.get_global_rank(),
+            world_size=dist.get_world_size(),
+            dataset_size=len(eval_dataset),
+        )
+
         eval_sampler = (
             dist.get_sampler(eval_dataset, shuffle=False, drop_last=False)
             if not isinstance(eval_dataset, StreamingDataset)
@@ -111,8 +113,13 @@ def main(cfg: DictConfig) -> None:
             collate_fn=eval_collator,
             sampler=eval_sampler,
         )
+        eval_evaluator = hydra.utils.instantiate(
+            cfg.eval_evaluator,
+            _convert_="partial",
+            dataloader=eval_dataloader,
+        )
     else:
-        eval_dataset, eval_dataloader = None, None
+        eval_dataset, eval_dataloader, eval_evaluator = None, None, None
     # time.sleep(30)  # Needed for multi-node training
 
     # Optimizer
@@ -149,7 +156,7 @@ def main(cfg: DictConfig) -> None:
         _convert_="all",
         model=model,
         train_dataloader=train_dataloader,
-        eval_dataloader=eval_dataloader,
+        eval_dataloader=eval_evaluator,
         optimizers=optimizer,
         schedulers=lr_scheduler,
         algorithms=list(algorithms.values()),
