@@ -448,11 +448,13 @@ class LogGradientNorms(Callback):
         self.include_embedding_params = include_embedding_params
         self.step_count = 0
 
-    def _is_embedding_param(self, param_name: str) -> bool:
+    @staticmethod
+    def _is_embedding_param(param_name: str) -> bool:
         """Check if a parameter is an embedding parameter."""
         return "embed" in param_name.lower()
 
-    def _get_model(self, state: State):
+    @staticmethod
+    def _get_model(state: State):
         """Get the model, handling wrapped models."""
         if hasattr(state.model, "module"):
             return state.model.module.model

@@ -6,7 +6,6 @@ source setup_env.sh
 
 # Model arch
 BLOCK_SIZE=1
-EVAL_BLOCK_SIZE=1
 N_ENCODER_LAYERS=28
 ENCODER_TOP_LAYERS=false
 N_DECODER_LAYERS=14
@@ -22,7 +21,7 @@ LR=1e-5
 WARMUP_DURATION="100ba"
 ALPHA_F=0.5
 BATCH_SIZE=1
-MAX_DURATION="30000ba"
+MAX_DURATION="100000ba"
 PRECISION="amp_bf16"
 
 PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-1.7B-Base
@@ -83,7 +82,6 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   training.global_batch_size=${BATCH_SIZE} \
   training.grad_accum=$(( BATCH_SIZE / NUM_VISIBLE_DEVICES / MICRO_BATCH_SIZE )) \
   block_size=${BLOCK_SIZE} \
-  eval_block_size=${EVAL_BLOCK_SIZE} \
   training.antithetic_sampling=false \
   hydra.run.dir=${RUN_DIR}/${RUN_NAME} \
   composer.callbacks.hf_compatible_checkpointing.save_interval="1000ba" \
@@ -92,5 +90,6 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   train_dataloader.num_workers=${NUM_WORKERS} \
   composer.callbacks.hf_compatible_checkpointing.disable_hf=true \
   eval_dataloader.batch_size=8 \
+  eval_evaluator.device_eval_microbatch_size=8 \
   model.config.train_on_context=${TRAIN_ON_CONTEXT} \
   model.config.bidirectional_ctx_attn=false

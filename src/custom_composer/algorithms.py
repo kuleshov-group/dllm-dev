@@ -2,10 +2,18 @@ import logging
 from typing import Any, List, Literal, Union
 
 from composer import Event, Logger, State, Time, TimeUnit
+from composer.algorithms.ema import EMA
 from composer.core.algorithm import Algorithm
 from composer.utils import reproducibility
 
 log = logging.getLogger(__name__)
+
+
+def _is_eval_event(event: Event, state: State) -> bool:
+    evaluators_executing = []
+    for evaluator in state.evaluators:
+        evaluators_executing.append(evaluator.eval_interval(state, event))
+    return any(evaluators_executing)
 
 
 class SetFixedRngStateForEval(Algorithm):
@@ -19,12 +27,12 @@ class SetFixedRngStateForEval(Algorithm):
         self._og_rng_state = None
 
         self.set_fixed_rng_state_events = [
-            Event.EVAL_START,
-            Event.EVAL_STANDALONE_START,
+            Event.EVAL_BEFORE_ALL,
+            # Event.EVAL_STANDALONE_START,
         ]
         self.restore_rng_state_events = [
-            Event.EVAL_END,
-            Event.EVAL_STANDALONE_END,
+            Event.EVAL_AFTER_ALL,
+            # Event.EVAL_STANDALONE_END,
         ]
 
     def _set_rng_state(self):
@@ -92,87 +100,100 @@ class BlockSizeAnnealing(Algorithm):
             ), "Only batch or epoch intervals are supported."
         self.factor = factor
         self.increase_via_add_or_multiply = increase_via_add_or_multiply
-        self.current_block_size = 0
+        # -1: sentinel value to indicate schedule has not started
+        self.block_size = -1
+        self._increase_deferred_until_eval_end = False
+
+    def match(self, event: Event, state: State) -> bool:
+        if event == Event.AFTER_LOAD:
+            return True
+
+        # Execute the "deferred" `apply`
+        if event == Event.EVAL_AFTER_ALL and self._increase_deferred_until_eval_end:
+            self._increase_deferred_until_eval_end = False  # reset
+            return True
+
+        # Currently, only batch or epoch are supported for scheduling increase
+        if event not in [Event.BATCH_END, Event.EPOCH_END]:
+            return False
+
+        if isinstance(self.schedule, list):
+            for s in self.schedule:
+                current_time = state.timestamp.get(s.unit).value
+                if current_time == s.value:
+                    # If trainer will execute eval, wait to apply block increase until
+                    # after eval loop end
+                    if _is_eval_event(event, state):
+                        self._increase_deferred_until_eval_end = True
+                        return False
+                    return True
+            return False
+        current_time = state.timestamp.get(self.schedule.unit).value
+        if current_time > 0 and current_time % self.schedule.value == 0:
+            # If trainer will execute eval, wait to apply block increase until after
+            # eval loop end
+            if _is_eval_event(event, state):
+                self._increase_deferred_until_eval_end = True
+                return False
+            return True
+
+        return False
+
+    @staticmethod
+    def _select_model_from_state(state: State):
+        if hasattr(state.model, "module"):
+            return state.model.module.model
+        else:
+            return state.model.model
 
     def _increase_block_size(self, current_block_size):
         if self.increase_via_add_or_multiply == "add":
             return current_block_size + self.factor
         return current_block_size * self.factor
 
-    def match(self, event: Event, state: State) -> bool:
-        if event == Event.AFTER_LOAD:
-            return True
-
-        if event not in [Event.BATCH_END, Event.EPOCH_END]:
-            return False
-        if hasattr(state.model, "module"):
-            if not hasattr(state.model.module.model.config, "block_size"):
-                raise ValueError(
-                    "Model config does not contain `block_size` parameter."
-                )
-            current_block_size = state.model.module.model.config.block_size
-        else:
-            if not hasattr(state.model.model.config, "block_size"):
-                raise ValueError(
-                    "Model config does not contain `block_size` parameter."
-                )
-            current_block_size = state.model.model.config.block_size
-        if current_block_size >= self.max_block_size:
-            return False
-        if isinstance(self.schedule, list):
-            for s in self.schedule:
-                current_time = state.timestamp.get(s.unit).value
-                if current_time == s.value:
-                    return True
-            return False
-        current_time = state.timestamp.get(self.schedule.unit).value
-        return current_time > 0 and current_time % self.schedule.value == 0
+    def _update_config_model_collators(self, state: State, new_block_size: int) -> None:
+        model = self._select_model_from_state(state)
+        if model.config.block_size >= self.max_block_size:
+            return
+        # Update model config
+        model.config.block_size = new_block_size
+        # Update model
+        model.update_static_mask(model.generate_static_mask())
+        # Update EMA model (if applicable)
+        for alg in state.algorithms:
+            if isinstance(alg, EMA):
+                if getattr(alg, "ema_model", None) is not None:
+                    alg.ema_model.swap_params(state.model)
+                    model.update_static_mask(model.generate_static_mask())
+                    alg.ema_model.swap_params(state.model)
+        # Update collators' block size
+        if new_block_size != state.train_dataloader.collate_fn.block_size:
+            state.train_dataloader.collate_fn.update_block_size(new_block_size)
+        for e in state.evaluators:
+            if new_block_size != e.dataloader.dataloader.collate_fn.block_size:
+                e.dataloader.dataloader.collate_fn.update_block_size(new_block_size)
 
     def apply(self, event: Event, state: State, logger: Logger) -> None:
         if event == Event.AFTER_LOAD:
-            if hasattr(state.model, "module"):
-                if (
-                    self.current_block_size
-                    != state.model.module.model.config.block_size
-                ):
-                    state.model.module.model.config.block_size = self.current_block_size
-                    state.model.module.model.update_static_mask(
-                        state.model.module.model.generate_static_mask()
-                    )
-            elif self.current_block_size != state.model.model.config.block_size:
-                state.model.model.config.block_size = self.current_block_size
-                state.model.model.update_static_mask(
-                    state.model.model.generate_static_mask()
-                )
-            log.info(f"Restored block size value to {self.current_block_size}.")
+            if self.block_size > 0:
+                self._update_config_model_collators(state, self.block_size)
+                log.info(f"Restored block size value to {self.block_size}.")
+            else:
+                model = self._select_model_from_state(state)
+                self.block_size = model.config.block_size
             return
 
-        # TODO: Will this work with FSDP?
-        if hasattr(state.model, "module"):
-            new_block_size = self._increase_block_size(
-                state.model.module.model.config.block_size
-            )
-            state.model.module.model.config.block_size = new_block_size
-            state.model.module.model.update_static_mask(
-                state.model.module.model.generate_static_mask()
-            )
-        else:
-            new_block_size = self._increase_block_size(
-                state.model.model.config.block_size
-            )
-            state.model.model.config.block_size = new_block_size
-            state.model.model.update_static_mask(
-                state.model.model.generate_static_mask()
-            )
-        log.info(
-            f"Block size updated from {self.current_block_size} set to {new_block_size}"
-        )
-        self.current_block_size = new_block_size
+        model = self._select_model_from_state(state)
+        new_block_size = self._increase_block_size(model.config.block_size)
+        self._update_config_model_collators(state, new_block_size)
+        log.info(f"Block size updated: {self.block_size} --> {new_block_size}")
+        self.block_size = new_block_size
+        self._increase_deferred_until_eval_end = False
 
     def state_dict(self) -> dict[str, Any]:
         state_dict = super().state_dict()
-        state_dict["current_block_size"] = self.current_block_size
+        state_dict["block_size"] = self.block_size
         return state_dict
 
     def load_state_dict(self, state_dict: dict[str, Any]) -> None:
-        self.current_block_size = state_dict["current_block_size"]
+        self.block_size = state_dict["block_size"]
