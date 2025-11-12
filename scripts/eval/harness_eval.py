@@ -6,7 +6,7 @@ import json
 import os
 import re
 import sys
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import accelerate
 import hydra
@@ -128,6 +128,19 @@ class LMEvalHarnessModel(LM):
     def loglikelihood_rolling(self, requests) -> List[float]:
         raise NotImplementedError
 
+    @property
+    def tokenizer_name(self):
+        return self.tokenizer.name_or_path
+
+    def apply_chat_template(
+        self, chat_history: List[Dict[str, str]], add_generation_prompt: bool = True
+    ):
+        return self.tokenizer.apply_chat_template(
+            chat_history,
+            tokenize=False,
+            add_generation_prompt=add_generation_prompt,
+        )
+
     def generate_until(self, requests, **generation_kwargs):
         # TODO: Move this to utils file / perhaps use chat template
         def _tokenize(
@@ -138,14 +151,32 @@ class LMEvalHarnessModel(LM):
             ),
         ):
             ctx = e["prefix"]
-            ctx = re.sub(
-                r"^####\s*(\d+)\s*$",
-                r"$\\boxed{\1}$" + self.tokenizer.eos_token,
-                ctx,
-                flags=re.MULTILINE,
-            )
-            ctx = ctx.replace("Question: ", prefix_text)
-            ctx = ctx.replace("\nAnswer:", f"{self.tokenizer.eos_token}Answer:")
+            if self.tokenizer.chat_template is not None:
+                # Extract question part (before "Answer:" if it exists)
+                if "\nAnswer:" in ctx:
+                    question_part = ctx.split("\nAnswer:")[0]
+                else:
+                    question_part = ctx
+
+                # Remove "Question: " prefix if present
+                if question_part.startswith("Question: "):
+                    question_text = question_part.replace("Question: ", prefix_text)
+                else:
+                    question_text = question_part
+
+                messages = [
+                    {"role": "user", "content": question_text},
+                ]
+                ctx = self.apply_chat_template(messages)
+            else:
+                ctx = re.sub(
+                    r"^####\s*(\d+)\s*$",
+                    r"$\\boxed{\1}$" + self.tokenizer.eos_token,
+                    ctx,
+                    flags=re.MULTILINE,
+                )
+                ctx = ctx.replace("Question: ", prefix_text)
+                ctx = ctx.replace("\nAnswer:", f"{self.tokenizer.eos_token}Answer:")
             prefix_tokens = self.tokenizer(ctx)["input_ids"]
             return {
                 "prefix_text": ctx,
@@ -190,7 +221,6 @@ class LMEvalHarnessModel(LM):
                 start_event, end_event = None, None
             sample = self.model.generate(
                 inputs=elem["prefix"][None, ...].to(self.device),
-                disable_pbar=(self.rank != 0),
                 # tokenizer=self.tokenizer,  # Uncomment for debugging
                 **self.gen_kwargs,
             )

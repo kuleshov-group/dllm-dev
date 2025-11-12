@@ -82,4 +82,4 @@ accelerate launch scripts/eval/harness_eval.py \
   generation_config.align_inputs_to_blocks=${ALIGN_INPUTS_TO_BLOCKS} \
   ~generation/logits_processor@logits_processor_list \
   gen_kwargs.logits_processor=null \
-  generation/stopping_criteria@stopping_criteria_list='[eos_token_criteria,max_length_criteria,gsm8k_regex_stopping_criteria]'
+  generation/stopping_criteria@stopping_criteria_list='[eos_token_criteria,gsm8k_regex_stopping_criteria]'
