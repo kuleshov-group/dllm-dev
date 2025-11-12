@@ -26,6 +26,7 @@ class DenoisingCollator:
         block_size: int | None = None,
         base_collator: Callable | None = None,
         presample_t: bool = False,
+        presample_t_seed: int = None,
         dataset_size: int | None = None,
     ):
         """
@@ -55,6 +56,7 @@ class DenoisingCollator:
             presample_t (bool; default: False): Whether to pre-sample timesteps.
                 Can be used to ensure reproducible validation results that are
                 independent per device eval batch size.
+            presample_t_seed (int | None): Must be provided if `presample_t` is True.
             dataset_size (int | None): Used for pre-sampling t.
                 Must be provided if `presample_t` is True.
         """
@@ -79,16 +81,23 @@ class DenoisingCollator:
         # TODO: Confirm that this works on multi-node
         self._rank = rank
         self._world_size = world_size
+        self._presample_t_seed = presample_t_seed
         if presample_t:
+            if presample_t_seed is None:
+                raise ValueError(
+                    "Seed for deterministically pre-sampling t must be provided."
+                )
             if dataset_size is None:
-                raise ValueError("Dataset size must be provided tp pre-sample t.")
+                raise ValueError("Dataset size must be provided to pre-sample t.")
             # TODO: enable presampling w/antithetic
-            self._presampled_t = self._sample_t(
-                global_batch_size=dataset_size,
-                batch_size=dataset_size,
-                t_index=(0, dataset_size),
-                device="cpu",
-            )
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(presample_t_seed)
+                self._presampled_t = self._sample_t(
+                    global_batch_size=dataset_size,
+                    batch_size=dataset_size,
+                    t_index=(0, dataset_size),
+                    device="cpu",
+                )
         else:
             self._presampled_t = None
 
@@ -96,12 +105,14 @@ class DenoisingCollator:
         self.block_size = new_block_size
         if self._presampled_t is not None:
             dataset_size = self._presampled_t.shape[0]
-            self._presampled_t = self._sample_t(
-                global_batch_size=dataset_size,
-                batch_size=dataset_size,
-                t_index=(0, dataset_size),
-                device="cpu",
-            )
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(self._presample_t_seed)
+                self._presampled_t = self._sample_t(
+                    global_batch_size=dataset_size,
+                    batch_size=dataset_size,
+                    t_index=(0, dataset_size),
+                    device="cpu",
+                )
 
     def _sample_t(self, global_batch_size, batch_size, t_index, device):
         num_blocks = self.max_length // self.block_size if self.block_size else 1

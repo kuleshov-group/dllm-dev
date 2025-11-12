@@ -5,3 +5,4 @@ defaults:
 block_size: ${block_size}
 # Used to ensure reproducible validation results; independent of per device batch size
 presample_t: true
+presample_t_seed: ${seed}
