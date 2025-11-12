@@ -5,7 +5,7 @@ defaults:
     - ema
     - gradient_clipping
     - set_fixed_rng_state_for_eval
-    - block_size_annealing
+#    - block_size_annealing
   - callbacks:
       - runtime_estimator
       - lr_monitor
