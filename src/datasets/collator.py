@@ -92,6 +92,17 @@ class DenoisingCollator:
         else:
             self._presampled_t = None
 
+    def update_block_size(self, new_block_size: int) -> None:
+        self.block_size = new_block_size
+        if self._presampled_t is not None:
+            dataset_size = self._presampled_t.shape[0]
+            self._presampled_t = self._sample_t(
+                global_batch_size=dataset_size,
+                batch_size=dataset_size,
+                t_index=(0, dataset_size),
+                device="cpu",
+            )
+
     def _sample_t(self, global_batch_size, batch_size, t_index, device):
         num_blocks = self.max_length // self.block_size if self.block_size else 1
         if self.block_size is not None and self.block_size > 0:
