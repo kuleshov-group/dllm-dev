@@ -2,6 +2,7 @@ from functools import partial
 from typing import Any, Dict, Literal, Optional, Tuple, Union
 
 import torch
+import torch.nn.functional as F
 from tqdm.auto import tqdm
 from transformers import (
     GenerationConfig,
@@ -164,14 +165,20 @@ class MDLM(Denoiser):
         )
         self.skip_params_for_push.append("static_attention_mask")
 
-    def generate_static_mask(self) -> torch.Tensor:
-        static_mask = torch.ones(
-            self.config.length, self.config.length, dtype=torch.bool
-        )
+    def generate_static_mask(self, length: Optional[int] = None) -> torch.Tensor:
+        if length is None:
+            length = self.config.length
+        static_mask = torch.ones(length, length, dtype=torch.bool)
         return static_mask
 
     def update_static_mask(self, new_static_mask: torch.Tensor) -> None:
         self.static_attention_mask.copy_(new_static_mask)
+
+    def _maybe_update_attention_mask(self, max_length: Optional[int] = None) -> None:
+        if max_length is None:
+            max_length = self.config.length
+        if self.static_attention_mask.shape[-1] < max_length:
+            self.update_static_mask(self.generate_static_mask(length=max_length))
 
     def _sample_q_xt(
         self,
@@ -282,10 +289,12 @@ class MDLM(Denoiser):
         if attention_mask is None:
             cache_length = self._get_past_key_values_seq_length(past_key_values)
             full_seq_length = cache_length + input_ids.shape[-1]
-            attention_mask = torch.ones(
-                (input_ids.shape[0], 1, input_ids.shape[1], full_seq_length),
-                device=input_ids.device,
-            )  # Make attention mask 4D
+            attention_mask = self.static_attention_mask[
+                None,
+                None,
+                : input_ids.shape[1],
+                :full_seq_length,
+            ]
             attention_mask = self._preprocess_attention_mask(
                 attention_mask, dtype=torch.float
             )
@@ -532,13 +541,19 @@ class MDLM(Denoiser):
                 max_new_tokens = generation_config.max_new_tokens
             else:
                 max_new_tokens = max_length - inputs.shape[-1]
+        self._maybe_update_attention_mask(max_length=inputs.shape[-1] + max_new_tokens)
         batch_size = batch_size if batch_size is not None else inputs.shape[0]
         assert batch_size == 1, "Batched sampling not supported yet"
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
         block_size = generation_config.block_size
         max_blocks = max_new_tokens // block_size
-        disable_pbar = torch.distributed.get_rank() != 0
+        rank = (
+            torch.distributed.get_rank()
+            if torch.distributed.is_available() and torch.distributed.is_initialized()
+            else 0
+        )
+        disable_pbar = rank != 0
 
         # Sample max generation length tensor from prior
         accumulated_samples = self.mask_token_id * torch.ones(
@@ -683,10 +698,12 @@ class BD3LMConfig(MDLMConfig):
     def __init__(
         self,
         block_size: Optional[int] = None,
+        bidirectional_ctx_attn: bool = True,
         **kwargs,
     ):
         super().__init__(**kwargs)
         self.block_size = block_size
+        self.bidirectional_ctx_attn = bidirectional_ctx_attn
 
 
 class BD3LM(MDLM):
@@ -696,6 +713,10 @@ class BD3LM(MDLM):
 
     def __init__(self, config: BD3LMConfig, **kwargs):
         super().__init__(config, **kwargs)
+        if self.config.bidirectional_ctx_attn:
+            assert self.config.attn_backend != "flex_attention", (
+                "flex_attention not supported for bidirectional context attention"
+            )
 
     # noinspection PyUnusedLocal
     @staticmethod
@@ -743,28 +764,34 @@ class BD3LM(MDLM):
             )
             self.skip_params_for_push.append("static_attention_mask")
 
-    def generate_static_mask(self) -> Union[torch.Tensor, BlockMask]:
+    def generate_static_mask(
+        self, length: Optional[int] = None, block_size: Optional[int] = None
+    ) -> Union[torch.Tensor, BlockMask]:
+        if length is None:
+            length = self.config.length
+        if block_size is None:
+            block_size = self.config.block_size
         if self.config.attn_backend == "flex_attention":
             mask = partial(
                 self._block_mask,
-                block_size=self.config.block_size,
-                seq_length=self.config.length,
+                block_size=block_size,
+                seq_length=length,
             )
             return create_block_mask(
                 mask,
                 B=None,
                 H=None,
-                Q_LEN=self.config.length * 2,
-                KV_LEN=self.config.length * 2,
+                Q_LEN=length * 2,
+                KV_LEN=length * 2,
             )
         else:
             static_mask = self._block_mask(
                 b=None,
                 h=None,
-                q_idx=torch.arange(self.config.length * 2)[:, None],
-                kv_idx=torch.arange(self.config.length * 2)[None, :],
-                block_size=self.config.block_size,
-                seq_length=self.config.length,
+                q_idx=torch.arange(length * 2)[:, None],
+                kv_idx=torch.arange(length * 2)[None, :],
+                block_size=block_size,
+                seq_length=length,
             )
             return static_mask
 
@@ -777,6 +804,13 @@ class BD3LM(MDLM):
         else:
             # noinspection PyAttributeOutsideInit
             self.static_attention_mask = new_static_mask
+
+    def _maybe_update_attention_mask(self, max_length: Optional[int] = None) -> None:
+        # NOTE: Only update the attention mask if the length is greater than the current length. Does not account for block size.
+        if max_length is None:
+            max_length = self.config.length
+        if (self.static_attention_mask.shape[-1] // 2) < max_length:
+            self.update_static_mask(self.generate_static_mask(length=max_length))
 
     def _ensure_no_unmasked_blocks(
         self,
@@ -852,8 +886,16 @@ class BD3LM(MDLM):
                 context_mask,
             )
         if self.config.attn_backend == "sdpa":
+            decoder_attention_mask = self.static_attention_mask[None, ...]
+            if self.config.bidirectional_ctx_attn:
+                context_mask_padded = F.pad(
+                    context_mask, (0, context_mask.shape[-1]), mode="constant", value=0
+                )
+                decoder_attention_mask = (
+                    decoder_attention_mask | context_mask_padded[:, None, :]
+                )
             decoder_attention_mask = (
-                self.static_attention_mask[None, ...]
+                decoder_attention_mask
                 & attention_mask.repeat(1, 2)[:, None, :]
                 & attention_mask.repeat(1, 2)[..., None]
             )[:, None, ...]  # Make attention mask 4D
@@ -1062,47 +1104,53 @@ class E2D2(BD3LM):
             self.skip_params_for_push.append("encoder_static_attention_mask")
             self.skip_params_for_push.append("static_attention_mask")
 
-    def generate_static_mask(self) -> Tuple[Union[torch.Tensor, BlockMask], ...]:
+    def generate_static_mask(
+        self, length: Optional[int] = None, block_size: Optional[int] = None
+    ) -> Tuple[Union[torch.Tensor, BlockMask], ...]:
+        if length is None:
+            length = self.config.length
+        if block_size is None:
+            block_size = self.config.block_size
         if self.config.attn_backend == "flex_attention":
             enc_mask = partial(
                 self._encoder_block_mask,
-                block_size=self.config.block_size,
+                block_size=block_size,
             )
             encoder_static_mask = create_block_mask(
                 enc_mask,
                 B=None,
                 H=None,
-                Q_LEN=self.config.length,
-                KV_LEN=self.config.length,
+                Q_LEN=length,
+                KV_LEN=length,
             )
             dec_mask = partial(
                 self._decoder_block_mask,
-                block_size=self.config.block_size,
-                seq_length=self.config.length,
+                block_size=block_size,
+                seq_length=length,
             )
             decoder_static_mask = create_block_mask(
                 dec_mask,
                 B=None,
                 H=None,
-                Q_LEN=self.config.length,
-                KV_LEN=self.config.length * 2,
+                Q_LEN=length,
+                KV_LEN=length * 2,
             )
 
         else:
             encoder_static_mask = self._encoder_block_mask(
                 b=None,  # type: ignore
                 h=None,  # type: ignore
-                q_idx=torch.arange(self.config.length)[:, None],
-                kv_idx=torch.arange(self.config.length)[None, :],
-                block_size=self.config.block_size,
+                q_idx=torch.arange(length)[:, None],
+                kv_idx=torch.arange(length)[None, :],
+                block_size=block_size,
             )
             decoder_static_mask = self._decoder_block_mask(
                 b=None,
                 h=None,
-                q_idx=torch.arange(self.config.length)[:, None],
-                kv_idx=torch.arange(self.config.length * 2)[None, :],
-                block_size=self.config.block_size,
-                seq_length=self.config.length,
+                q_idx=torch.arange(length)[:, None],
+                kv_idx=torch.arange(length * 2)[None, :],
+                block_size=block_size,
+                seq_length=length,
             )
         return encoder_static_mask, decoder_static_mask
 
@@ -1118,6 +1166,13 @@ class E2D2(BD3LM):
         else:
             self.encoder_static_attention_mask.copy_(new_static_mask[0])
             self.static_attention_mask.copy_(new_static_mask[1])
+
+    def _maybe_update_attention_mask(self, max_length: Optional[int] = None) -> None:
+        # NOTE: Only update the attention mask if the length is greater than the current length. Does not account for block size.
+        if max_length is None:
+            max_length = self.config.length
+        if self.encoder_static_attention_mask.shape[-1] < max_length:
+            self.update_static_mask(self.generate_static_mask(length=max_length))
 
     def _prepare_inputs(
         self,
@@ -1163,11 +1218,13 @@ class E2D2(BD3LM):
                 & attention_mask.repeat(1, 2)[:, None, :]
                 & attention_mask[..., None]
             )[:, None, ...]  # Make attention mask 4D
-            encoder_attention_mask = (
-                (
-                    self.encoder_static_attention_mask[None, ...]
-                    | context_mask[:, None, :]
+            encoder_attention_mask = self.encoder_static_attention_mask[None, ...]
+            if self.config.bidirectional_ctx_attn:
+                encoder_attention_mask = (
+                    encoder_attention_mask | context_mask[:, None, :]
                 )
+            encoder_attention_mask = (
+                encoder_attention_mask[None, ...]
                 & attention_mask[:, None, :]
                 & attention_mask[..., None]
             )[:, None, ...]  # Make attention mask 4D
@@ -1286,15 +1343,14 @@ class E2D2(BD3LM):
                     else past_key_values
                 )
                 encoder_full_seq_length = encoder_cache_length + context.shape[-1]
-                encoder_attention_mask = torch.ones(
-                    (
-                        1,
-                        1,
-                        encoder_full_seq_length - encoder_cache_length,
-                        encoder_full_seq_length,
-                    ),
-                    device=context.device,
-                )
+                encoder_attention_mask = self.encoder_static_attention_mask[
+                    None,
+                    None,
+                    encoder_cache_length:encoder_full_seq_length,
+                    :encoder_full_seq_length,
+                ]
+                if self.config.bidirectional_ctx_attn:
+                    encoder_attention_mask.fill_(1)
                 encoder_position_ids = torch.arange(
                     encoder_cache_length, encoder_full_seq_length
                 ).to(device)[None, :]
@@ -1307,9 +1363,11 @@ class E2D2(BD3LM):
             encoder_past_key_values, encoder_last_hidden_state = None, None
             if context is not None:
                 context_len = context.shape[1]
-                encoder_attention_mask = torch.ones(
-                    (1, 1, context_len, context_len), device=context.device
-                )
+                encoder_attention_mask = self.encoder_static_attention_mask[
+                    None, None, :context_len, :context_len
+                ]
+                if self.config.bidirectional_ctx_attn:
+                    encoder_attention_mask.fill_(1)
                 encoder_attention_mask = self._preprocess_attention_mask(
                     encoder_attention_mask, dtype=torch.float
                 )
@@ -1325,10 +1383,14 @@ class E2D2(BD3LM):
                 None, :
             ]
         if input_ids is not None:
-            decoder_attention_mask = torch.ones(
-                (batch_size, 1, input_ids.shape[1], full_seq_length),
-                device=device,
-            )  # Make attention mask 4D
+            decoder_attention_mask = self.static_attention_mask[
+                None,
+                None,
+                : input_ids.shape[1],
+                :full_seq_length,
+            ]
+            if self.config.bidirectional_ctx_attn:
+                decoder_attention_mask.fill_(1)
             decoder_attention_mask = self._preprocess_attention_mask(
                 decoder_attention_mask, dtype=torch.float
             )

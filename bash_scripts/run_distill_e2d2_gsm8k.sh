@@ -92,4 +92,5 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   train_dataloader.num_workers=${NUM_WORKERS} \
   composer.callbacks.hf_compatible_checkpointing.disable_hf=true \
   eval_dataloader.batch_size=8 \
-  model.config.train_on_context=${TRAIN_ON_CONTEXT}
+  model.config.train_on_context=${TRAIN_ON_CONTEXT} \
+  model.config.bidirectional_ctx_attn=false
