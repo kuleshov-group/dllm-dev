@@ -1386,7 +1386,7 @@ class E2D2(BD3LM):
             decoder_attention_mask = self.static_attention_mask[
                 None,
                 None,
-                : input_ids.shape[1],
+                cache_length : full_seq_length,
                 :full_seq_length,
             ]
             if self.config.bidirectional_ctx_attn:
