@@ -1389,8 +1389,7 @@ class E2D2(BD3LM):
                 cache_length : full_seq_length,
                 :full_seq_length,
             ]
-            if self.config.bidirectional_ctx_attn:
-                decoder_attention_mask.fill_(1)
+            decoder_attention_mask.fill_(1)
             decoder_attention_mask = self._preprocess_attention_mask(
                 decoder_attention_mask, dtype=torch.float
             )
