@@ -134,7 +134,6 @@ class AR(Denoiser):
         batch_size: Optional[int] = None,
         device: Optional[str] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
-        disable_pbar: Optional[bool] = None,  # not used; compat. w/other denoisers
         **kwargs,
     ) -> Union[GenerateOutput, torch.LongTensor]:
         outputs = self.backbone.model.generate(
@@ -142,8 +141,7 @@ class AR(Denoiser):
             attention_mask=torch.ones_like(inputs),
             generation_config=generation_config,
             logits_processor=logits_processor,
-            # TODO: debug: passing EOS stopping criteria generates EOS right away?
-            # stopping_criteria=stopping_criteria,
+            stopping_criteria=stopping_criteria,
             max_length=max_length,
             max_new_tokens=max_new_tokens,
             # TODO: Can we pass this in `generation_config`?
