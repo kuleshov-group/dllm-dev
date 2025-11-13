@@ -23,6 +23,8 @@ except ImportError:
     BlockMask, and_masks, create_block_mask = None, None, None
 
 
+from dataclasses import dataclass
+
 from src.denoiser.base import (
     Denoiser,
     DenoiserConfig,
@@ -124,6 +126,7 @@ class DiffusionGenerationConfig(GenerationConfig):
         self.confidence_margin_based_noising = confidence_margin_based_noising
         self.confidence_threshold = confidence_threshold
         self.align_inputs_to_blocks = align_inputs_to_blocks
+
 
 @dataclass
 class DiffusionGenerationOutput(GenerateDecoderOnlyOutput):
