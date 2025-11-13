@@ -11,7 +11,8 @@ from transformers import (
     StoppingCriteriaList,
 )
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation.utils import GenerateDecoderOnlyOutput
+from transformers.generation.utils import GenerateOutput
+from transformers.modeling_outputs import ModelOutput
 
 try:
     from torch.nn.attention.flex_attention import (
@@ -129,7 +130,7 @@ class DiffusionGenerationConfig(GenerationConfig):
 
 
 @dataclass
-class DiffusionGenerationOutput(GenerateDecoderOnlyOutput):
+class DiffusionGenerationOutput(GenerateOutput):
     """
     Outputs of decoder-only generation models, when using non-beam methods.
 
@@ -163,7 +164,7 @@ class DiffusionGenerationOutput(GenerateDecoderOnlyOutput):
     attentions: Optional[tuple[tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[tuple[tuple[torch.FloatTensor]]] = None
     past_key_values: Optional[Cache] = None
-    parallelism_factor: Optional[float] = -1.0
+    parallelism_factor: Optional[float] = None
 
 
 class MDLMConfig(DenoiserConfig):
@@ -564,7 +565,7 @@ class MDLM(Denoiser):
         device: Optional[str] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
         **kwargs: Any,
-    ) -> Union[torch.LongTensor, GenerateDecoderOnlyOutput]:
+    ) -> Union[torch.LongTensor, ModelOutput]:
         # Setup sampling variables
         if generation_config is None:
             assert getattr(self, "generation_config", None) is not None, (

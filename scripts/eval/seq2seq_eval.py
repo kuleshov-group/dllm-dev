@@ -167,6 +167,8 @@ def main(cfg: DictConfig) -> None:
             if isinstance(generation_outputs, ModelOutput):
                 outputs = generation_outputs.sequences
                 parallelism_factor = generation_outputs.get("parallelism_factor", -1.0)
+                if parallelism_factor is None:
+                    parallelism_factor = -1.0
             else:
                 outputs = generation_outputs
                 parallelism_factor = -1.0

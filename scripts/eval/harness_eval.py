@@ -243,6 +243,8 @@ class LMEvalHarnessModel(LM):
             if isinstance(generation_outputs, ModelOutput):
                 sample = generation_outputs.sequences
                 parallelism_factor = generation_outputs.get("parallelism_factor", -1.0)
+                if parallelism_factor is None:
+                    parallelism_factor = -1.0
             else:
                 sample = generation_outputs
                 parallelism_factor = -1.0
