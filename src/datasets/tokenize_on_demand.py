@@ -30,6 +30,7 @@ class GSM8KDataset(Dataset):
         source_key: str = "question",
         target_key: str = "answer",
         num_shot: int = 0,
+        use_chat_template: bool = False,
         # Unused tokenizer arg (compat. with other dataset loading functions/classes)
         **_: Dict[str, Any],
     ):
@@ -46,7 +47,16 @@ class GSM8KDataset(Dataset):
         self.source_key = source_key
         self.target_key = target_key
         self.num_shot = num_shot
+        self.use_chat_template = use_chat_template
         self._arange = range(len(self.dataset))
+
+        # Check if tokenizer has chat template
+        if self.use_chat_template and not hasattr(
+            self.tokenizer, "apply_chat_template"
+        ):
+            raise ValueError(
+                "use_chat_template=True but tokenizer does not support chat templates"
+            )
 
     def __len__(self):
         return len(self.dataset)
@@ -59,46 +69,117 @@ class GSM8KDataset(Dataset):
 
     def __getitem__(self, idx):
         example = self.dataset[idx]
-        sp = (self.tokenizer.bos_token if self.add_special_tokens else "") + (
-            self.source_prompt_text if self.source_prompt_text is not None else ""
-        )
-        tp = self.target_prompt_text if self.target_prompt_text is not None else ""
-        if self.num_shot > 0:
-            example_shots = [self.dataset[fsi] for fsi in self._few_shot_idxs(idx)]
-            source = "\n".join(
-                [
-                    sp
-                    + i[self.source_key]  # type: ignore
-                    + (self.tokenizer.eos_token if self.add_special_tokens else "")
-                    + tp
-                    + re.sub(  # type: ignore
+        if self.use_chat_template:
+            # Use chat template format
+            messages = []
+
+            # Add few-shot examples if needed
+            if self.num_shot > 0:
+                example_shots = [self.dataset[fsi] for fsi in self._few_shot_idxs(idx)]
+                for shot in example_shots:
+                    user_content = (
+                        self.source_prompt_text if self.source_prompt_text else ""
+                    ) + shot[self.source_key]  # type: ignore
+                    assistant_content = (
+                        self.target_prompt_text if self.target_prompt_text else ""
+                    ) + re.sub(  # type: ignore
                         r"^####\s*(\d+)\s*$",
                         r"$\\boxed{\1}$",
-                        i[self.target_key],
+                        shot[self.target_key],
                         flags=re.MULTILINE,
                     )
-                    + (self.tokenizer.eos_token if self.add_special_tokens else "")
-                    for i in example_shots
-                ]
+                    messages.append({"role": "user", "content": user_content})
+                    messages.append({"role": "assistant", "content": assistant_content})
+
+            # Add current example
+            user_content = (
+                self.source_prompt_text if self.source_prompt_text else ""
+            ) + example[self.source_key]  # type: ignore
+            messages.append({"role": "user", "content": user_content})
+            # Format source with chat template (up to user message, with generation prompt)
+            source = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
             )
-        else:
-            source = ""
-        source = (
-            source
-            + sp
-            + example[self.source_key]  # type: ignore
-            + (self.tokenizer.eos_token if self.add_special_tokens else "")
-        )
-        target = (
-            tp
-            + re.sub(  # type: ignore
+            assistant_content = (
+                self.target_prompt_text if self.target_prompt_text else ""
+            ) + re.sub(  # type: ignore
                 r"^####\s*(\d+)\s*$",
                 r"$\\boxed{\1}$",
                 example[self.target_key],
                 flags=re.MULTILINE,
             )
-            + (self.tokenizer.eos_token if self.add_special_tokens else "")
-        )
+            # Get the full formatted conversation including assistant response
+            full_messages = messages + [
+                {"role": "assistant", "content": assistant_content}
+            ]
+            full_formatted = self.tokenizer.apply_chat_template(
+                full_messages,
+                tokenize=False,
+                add_generation_prompt=False,
+                enable_thinking=False,
+            )
+            # Extract just the assistant's response part
+            # The target is everything after the source in the full formatted string
+            if full_formatted.startswith(source):
+                target = full_formatted[len(source) :]
+            else:
+                # Fallback: if templates don't align, just use assistant content
+                # Some templates might add extra tokens, so we tokenize to get the difference
+                source_tokens = self.tokenizer.encode(source, add_special_tokens=False)
+                full_tokens = self.tokenizer.encode(
+                    full_formatted, add_special_tokens=False
+                )
+                if len(full_tokens) > len(source_tokens):
+                    target_tokens = full_tokens[len(source_tokens) :]
+                    target = self.tokenizer.decode(
+                        target_tokens, skip_special_tokens=False
+                    )
+                else:
+                    target = assistant_content
+        else:
+            sp = (self.tokenizer.bos_token if self.add_special_tokens else "") + (
+                self.source_prompt_text if self.source_prompt_text is not None else ""
+            )
+            tp = self.target_prompt_text if self.target_prompt_text is not None else ""
+            if self.num_shot > 0:
+                example_shots = [self.dataset[fsi] for fsi in self._few_shot_idxs(idx)]
+                source = "\n".join(
+                    [
+                        sp
+                        + i[self.source_key]  # type: ignore
+                        + (self.tokenizer.eos_token if self.add_special_tokens else "")
+                        + tp
+                        + re.sub(  # type: ignore
+                            r"^####\s*(\d+)\s*$",
+                            r"$\\boxed{\1}$",
+                            i[self.target_key],
+                            flags=re.MULTILINE,
+                        )
+                        + (self.tokenizer.eos_token if self.add_special_tokens else "")
+                        for i in example_shots
+                    ]
+                )
+            else:
+                source = ""
+            source = (
+                source
+                + sp
+                + example[self.source_key]  # type: ignore
+                + (self.tokenizer.eos_token if self.add_special_tokens else "")
+            )
+            target = (
+                tp
+                + re.sub(  # type: ignore
+                    r"^####\s*(\d+)\s*$",
+                    r"$\\boxed{\1}$",
+                    example[self.target_key],
+                    flags=re.MULTILINE,
+                )
+                + (self.tokenizer.eos_token if self.add_special_tokens else "")
+            )
 
         qa_tokenized = self.tokenizer.batch_encode_plus(
             [source, target],
@@ -144,6 +225,7 @@ class GSM8KAugDataset(GSM8KDataset):
         steps_key: str = "steps",
         target_key: str = "answer",
         num_shot: int = 0,
+        use_chat_template: bool = False,
         # Unused tokenizer arg (compat. with other dataset loading functions/classes)
         **_: Dict[str, Any],
     ):
@@ -159,7 +241,16 @@ class GSM8KAugDataset(GSM8KDataset):
         self.steps_key = steps_key
         self.target_key = target_key
         self.num_shot = num_shot
+        self.use_chat_template = use_chat_template
         self._arange = range(len(self.dataset))
+
+        # Check if tokenizer has chat template
+        if self.use_chat_template and not hasattr(
+            self.tokenizer, "apply_chat_template"
+        ):
+            raise ValueError(
+                "use_chat_template=True but tokenizer does not support chat templates"
+            )
 
     @staticmethod
     def _process_step(line: str) -> str:
@@ -170,46 +261,125 @@ class GSM8KAugDataset(GSM8KDataset):
 
     def __getitem__(self, idx):
         example = self.dataset[idx]
-        sp = (self.tokenizer.bos_token if self.add_special_tokens else "") + (
-            self.source_prompt_text if self.source_prompt_text is not None else ""
-        )
-        tp = self.target_prompt_text if self.target_prompt_text is not None else ""
-        if self.num_shot > 0:
-            example_shots = [self.dataset[fsi] for fsi in self._few_shot_idxs(idx)]
-            source = (
-                "\n".join(
-                    [
-                        sp
-                        + i[self.source_key]  # type: ignore
-                        + (self.tokenizer.eos_token if self.add_special_tokens else "")
-                        + tp
-                        + "\n".join([self._process_step(s) for s in i[self.steps_key]])
+
+        if self.use_chat_template:
+            messages = []
+
+            # Add few-shot examples if needed
+            if self.num_shot > 0:
+                example_shots = [self.dataset[fsi] for fsi in self._few_shot_idxs(idx)]
+                for shot in example_shots:
+                    user_content = (
+                        self.source_prompt_text if self.source_prompt_text else ""
+                    ) + shot[self.source_key]  # type: ignore
+                    assistant_content = (
+                        (self.target_prompt_text if self.target_prompt_text else "")
+                        + "\n".join(
+                            [self._process_step(s) for s in shot[self.steps_key]]
+                        )
                         + "\n$\\boxed{"
-                        + i[self.target_key]  # type: ignore
+                        + shot[self.target_key]
                         + "}$"
-                        + (self.tokenizer.eos_token if self.add_special_tokens else "")
-                        for i in example_shots
-                    ]
-                )
-                + "\n"
+                    )  # type: ignore
+                    messages.append({"role": "user", "content": user_content})
+                    messages.append({"role": "assistant", "content": assistant_content})
+
+            # Add current example
+            user_content = (
+                self.source_prompt_text if self.source_prompt_text else ""
+            ) + example[self.source_key]  # type: ignore
+            messages.append({"role": "user", "content": user_content})
+
+            # Format source with chat template
+            source = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
             )
+
+            assistant_content = (
+                (self.target_prompt_text if self.target_prompt_text else "")
+                + "\n".join([self._process_step(s) for s in example[self.steps_key]])
+                + "\n$\\boxed{"
+                + example[self.target_key]
+                + "}$"
+            )  # type: ignore
+            full_messages = messages + [
+                {"role": "assistant", "content": assistant_content}
+            ]
+            full_formatted = self.tokenizer.apply_chat_template(
+                full_messages,
+                tokenize=False,
+                add_generation_prompt=False,
+                enable_thinking=False,
+            )
+            if full_formatted.startswith(source):
+                target = full_formatted[len(source) :]
+            else:
+                # Fallback: tokenize to get difference
+                source_tokens = self.tokenizer.encode(source, add_special_tokens=False)
+                full_tokens = self.tokenizer.encode(
+                    full_formatted, add_special_tokens=False
+                )
+                if len(full_tokens) > len(source_tokens):
+                    target_tokens = full_tokens[len(source_tokens) :]
+                    target = self.tokenizer.decode(
+                        target_tokens, skip_special_tokens=False
+                    )
+                else:
+                    target = assistant_content
         else:
-            source = ""
-        source = (
-            source
-            + sp
-            + example[self.source_key]  # type: ignore
-            + (self.tokenizer.eos_token if self.add_special_tokens else "")
-        )
-        # Combine steps + final answer
-        target = (
-            tp
-            + "\n".join([self._process_step(s) for s in example[self.steps_key]])
-            + "\n$\\boxed{"
-            + example[self.target_key]  # type: ignore
-            + "}$"
-            + (self.tokenizer.eos_token if self.add_special_tokens else "")
-        )
+            sp = (self.tokenizer.bos_token if self.add_special_tokens else "") + (
+                self.source_prompt_text if self.source_prompt_text is not None else ""
+            )
+            tp = self.target_prompt_text if self.target_prompt_text is not None else ""
+            if self.num_shot > 0:
+                example_shots = [self.dataset[fsi] for fsi in self._few_shot_idxs(idx)]
+                source = (
+                    "\n".join(
+                        [
+                            sp
+                            + i[self.source_key]  # type: ignore
+                            + (
+                                self.tokenizer.eos_token
+                                if self.add_special_tokens
+                                else ""
+                            )
+                            + tp
+                            + "\n".join(
+                                [self._process_step(s) for s in i[self.steps_key]]
+                            )
+                            + "\n$\\boxed{"
+                            + i[self.target_key]  # type: ignore
+                            + "}$"
+                            + (
+                                self.tokenizer.eos_token
+                                if self.add_special_tokens
+                                else ""
+                            )
+                            for i in example_shots
+                        ]
+                    )
+                    + "\n"
+                )
+            else:
+                source = ""
+            source = (
+                source
+                + sp
+                + example[self.source_key]  # type: ignore
+                + (self.tokenizer.eos_token if self.add_special_tokens else "")
+            )
+            # Combine steps + final answer
+            target = (
+                tp
+                + "\n".join([self._process_step(s) for s in example[self.steps_key]])
+                + "\n$\\boxed{"
+                + example[self.target_key]  # type: ignore
+                + "}$"
+                + (self.tokenizer.eos_token if self.add_special_tokens else "")
+            )
 
         qa_tokenized = self.tokenizer.batch_encode_plus(
             [source, target],
@@ -262,6 +432,7 @@ class HendrycksMathDataset(GSM8KDataset):
         source_key: str = "problem",
         target_key: str = "solution",
         num_shot: int = 0,
+        use_chat_template: bool = False,
         # Unused tokenizer arg (compat. with other dataset loading functions/classes)
         **_: Dict[str, Any],
     ):
@@ -278,6 +449,7 @@ class HendrycksMathDataset(GSM8KDataset):
             source_key=source_key,
             target_key=target_key,
             num_shot=num_shot,
+            use_chat_template=use_chat_template,
         )
 
 
@@ -297,6 +469,7 @@ class CNNDailyMailDataset(Dataset):
         target_key: str = "highlights",
         separate_input_output: bool = False,
         truncate: bool = True,
+        use_chat_template: bool = False,
         # Unused tokenizer arg (compat. with other dataset loading functions/classes)
         **_: Dict[str, Any],
     ):
@@ -313,6 +486,15 @@ class CNNDailyMailDataset(Dataset):
         self.source_key = source_key
         self.target_key = target_key
         self.truncate = truncate
+        self.use_chat_template = use_chat_template
+
+        # Check if tokenizer has chat template
+        if self.use_chat_template and not hasattr(
+            self.tokenizer, "apply_chat_template"
+        ):
+            raise ValueError(
+                "use_chat_template=True but tokenizer does not support chat templates"
+            )
 
     @property
     def target_references(self) -> list[str]:
@@ -324,15 +506,58 @@ class CNNDailyMailDataset(Dataset):
 
     def __getitem__(self, idx):
         example = self.dataset[idx]
-        source = example[self.source_key]
-        target = example[self.target_key]
-        if self.source_prompt_text is not None:
-            source = self.source_prompt_text + source  # type: ignore
-        if self.target_prompt_text is not None:
-            target = self.target_prompt_text + target  # type: ignore
-        if self.add_special_tokens:
-            source = self.tokenizer.bos_token + source + self.tokenizer.eos_token
-            target = target + self.tokenizer.eos_token
+
+        if self.use_chat_template:
+            messages = [
+                {
+                    "role": "user",
+                    "content": (self.source_prompt_text or "")
+                    + example[self.source_key],
+                }
+            ]
+            source = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            assistant_content = (self.target_prompt_text or "") + example[
+                self.target_key
+            ]
+            full_messages = messages + [
+                {"role": "assistant", "content": assistant_content}
+            ]
+            full_formatted = self.tokenizer.apply_chat_template(
+                full_messages,
+                tokenize=False,
+                add_generation_prompt=False,
+                enable_thinking=False,
+            )
+            if full_formatted.startswith(source):
+                target = full_formatted[len(source) :]
+            else:
+                # Fallback: tokenize to get difference
+                source_tokens = self.tokenizer.encode(source, add_special_tokens=False)
+                full_tokens = self.tokenizer.encode(
+                    full_formatted, add_special_tokens=False
+                )
+                if len(full_tokens) > len(source_tokens):
+                    target_tokens = full_tokens[len(source_tokens) :]
+                    target = self.tokenizer.decode(
+                        target_tokens, skip_special_tokens=False
+                    )
+                else:
+                    target = assistant_content
+        else:
+            source = example[self.source_key]
+            target = example[self.target_key]
+            if self.source_prompt_text is not None:
+                source = self.source_prompt_text + source  # type: ignore
+            if self.target_prompt_text is not None:
+                target = self.target_prompt_text + target  # type: ignore
+            if self.add_special_tokens:
+                source = self.tokenizer.bos_token + source + self.tokenizer.eos_token
+                target = target + self.tokenizer.eos_token
 
         seq2seq_tokenized = self.tokenizer.batch_encode_plus(
             [source, target],
@@ -400,6 +625,7 @@ class WMTDataset(Dataset):
         source_key: str = "translation",
         target_key: str = "translation",
         separate_input_output: bool = False,
+        use_chat_template: bool = False,
         # Unused tokenizer arg (compat. with other dataset loading functions/classes)
         **_: Dict[str, Any],
     ):
@@ -422,6 +648,15 @@ class WMTDataset(Dataset):
         self.separate_input_output = separate_input_output
         self.source_key = source_key
         self.target_key = target_key
+        self.use_chat_template = use_chat_template
+
+        # Check if tokenizer has chat template
+        if self.use_chat_template and not hasattr(
+            self.tokenizer, "apply_chat_template"
+        ):
+            raise ValueError(
+                "use_chat_template=True but tokenizer does not support chat templates"
+            )
 
     @property
     def target_references(self) -> list[str]:
@@ -433,15 +668,54 @@ class WMTDataset(Dataset):
 
     def __getitem__(self, idx):
         example = self.dataset[idx]
-        source = example[self.source_key][self.source]  # type: ignore
-        target = example[self.target_key][self.target]  # type: ignore
-        if self.source_prompt_text is not None:
-            source = self.source_prompt_text + source
-        if self.target_prompt_text is not None:
-            target = self.target_prompt_text + target
-        if self.add_special_tokens:
-            source = self.tokenizer.bos_token + source + self.tokenizer.eos_token
-            target = target + self.tokenizer.eos_token
+        if self.use_chat_template:
+            user_content = (self.source_prompt_text or "") + example[self.source_key][
+                self.source
+            ]  # type: ignore
+            messages = [{"role": "user", "content": user_content}]
+            source = self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True,
+                enable_thinking=False,
+            )
+            assistant_content = (self.target_prompt_text or "") + example[
+                self.target_key
+            ][self.target]  # type: ignore
+            full_messages = messages + [
+                {"role": "assistant", "content": assistant_content}
+            ]
+            full_formatted = self.tokenizer.apply_chat_template(
+                full_messages,
+                tokenize=False,
+                add_generation_prompt=False,
+                enable_thinking=False,
+            )
+            if full_formatted.startswith(source):
+                target = full_formatted[len(source) :]
+            else:
+                # Fallback: tokenize to get difference
+                source_tokens = self.tokenizer.encode(source, add_special_tokens=False)
+                full_tokens = self.tokenizer.encode(
+                    full_formatted, add_special_tokens=False
+                )
+                if len(full_tokens) > len(source_tokens):
+                    target_tokens = full_tokens[len(source_tokens) :]
+                    target = self.tokenizer.decode(
+                        target_tokens, skip_special_tokens=False
+                    )
+                else:
+                    target = assistant_content
+        else:
+            source = example[self.source_key][self.source]  # type: ignore
+            target = example[self.target_key][self.target]  # type: ignore
+            if self.source_prompt_text is not None:
+                source = self.source_prompt_text + source
+            if self.target_prompt_text is not None:
+                target = self.target_prompt_text + target
+            if self.add_special_tokens:
+                source = self.tokenizer.bos_token + source + self.tokenizer.eos_token
+                target = target + self.tokenizer.eos_token
 
         seq2seq_tokenized = self.tokenizer.batch_encode_plus(
             [source, target],

@@ -1,0 +1,42 @@
+#file: noinspection LongLine
+defaults:
+  - generation@generation_config: generation_config
+  - generation/logits_processor@logits_processor_list: ???
+  - generation/stopping_criteria@stopping_criteria_list: ???
+  - tokenizer: autotokenizer
+  - collator: dump_targets
+  - dataset: ???
+  - _self_
+
+seed: 1234
+pretrained_model_name_or_path: ???
+pretrained_model_revision: null
+output_path: ???  # Where to save the distillation dataset
+save_interval: 100  # Save dataset every N samples (for incremental saving)
+
+eos_token_id: ${get_tokenizer_eos_token_id:${tokenizer}}
+# Generation parameters
+max_length: null
+max_new_tokens: null
+batch_size: 1  # Batch size for generation
+
+# Dataloader configuration
+dataloader:
+  _target_: torch.utils.data.DataLoader
+  batch_size: ${batch_size}
+  num_workers: 0  # Set to 0 for inference to avoid multiprocessing issues
+  pin_memory: true
+  shuffle: false  # No shuffle for inference
+  drop_last: false  # Don't drop last batch
+
+backend: ${set_backend:}
+gen_kwargs:
+  generation_config: ${generation_config}
+  logits_processor:
+    _target_: src.custom_transformers.generation.HydraCompatibleLogitsProcessorList
+    logits_processor_dict: ${logits_processor_list}
+  stopping_criteria:
+    _target_: src.custom_transformers.generation.HydraCompatibleStoppingCriteriaList
+    stopping_criteria_dict: ${stopping_criteria_list}
+  max_length: ${max_length}
+  max_new_tokens: ${max_new_tokens}

@@ -1,0 +1,5 @@
+_target_: src.datasets.collator.DumpTargetsCollator
+padding: "max_length"
+max_length: ${model.config.length}
+pad_to_multiple_of: null
+return_tensors: "pt"
