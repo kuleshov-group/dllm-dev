@@ -125,7 +125,7 @@ class DiffusionGenerationConfig(GenerationConfig):
         self.confidence_threshold = confidence_threshold
         self.align_inputs_to_blocks = align_inputs_to_blocks
 
-
+@dataclass
 class DiffusionGenerationOutput(GenerateDecoderOnlyOutput):
     """
     Outputs of decoder-only generation models, when using non-beam methods.
@@ -730,7 +730,7 @@ class MDLM(Denoiser):
         parallelism_factor = sum(num_tokens_generated_per_step) / len(
             num_tokens_generated_per_step
         )
-        if getattr(self, "return_parallelism_factor", False):
+        if return_dict_in_generate:
             return DiffusionGenerationOutput(
                 sequences=accumulated_samples,
                 parallelism_factor=parallelism_factor,
