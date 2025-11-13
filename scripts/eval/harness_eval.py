@@ -23,6 +23,7 @@ from transformers import (
     AutoModelForMaskedLM,
     PreTrainedTokenizer,
 )
+from transformers.modeling_outputs import ModelOutput
 
 from datasets import Dataset
 from scripts.utils import (
@@ -239,11 +240,9 @@ class LMEvalHarnessModel(LM):
                 # tokenizer=self.tokenizer,  # Uncomment for debugging
                 **self.gen_kwargs,
             )
-            if isinstance(generation_outputs, dict):
-                assert "outputs" in generation_outputs, "generation_outputs must contain 'outputs' key if it is a dict"
-                sample = generation_outputs["outputs"]
-                if "parallelism_factor" in generation_outputs:
-                    parallelism_factor = generation_outputs["parallelism_factor"]
+            if isinstance(generation_outputs, ModelOutput):
+                sample = generation_outputs.sequences
+                parallelism_factor = generation_outputs.get("parallelism_factor", -1.0)
             else:
                 sample = generation_outputs
                 parallelism_factor = -1.0

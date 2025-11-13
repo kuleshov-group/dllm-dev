@@ -11,6 +11,7 @@ from transformers import (
     StoppingCriteriaList,
 )
 from transformers.cache_utils import Cache, DynamicCache
+from transformers.generation.utils import GenerateDecoderOnlyOutput
 
 try:
     from torch.nn.attention.flex_attention import (
@@ -123,6 +124,43 @@ class DiffusionGenerationConfig(GenerationConfig):
         self.confidence_margin_based_noising = confidence_margin_based_noising
         self.confidence_threshold = confidence_threshold
         self.align_inputs_to_blocks = align_inputs_to_blocks
+
+
+class DiffusionGenerationOutput(GenerateDecoderOnlyOutput):
+    """
+    Outputs of decoder-only generation models, when using non-beam methods.
+
+    Args:
+        sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
+            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
+            if all batches finished early due to the `eos_token_id`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True`):
+            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
+            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
+            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
+        logits (`tuple(torch.FloatTensor)` *optional*, returned when `output_logits=True`):
+            Unprocessed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
+            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
+            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
+        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
+        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
+            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
+        past_key_values (`Cache`, *optional*, returned when `use_cache=True`):
+            Returns the model cache, used to speed up decoding. Different models have a different cache format, check
+            the model's documentation. Usually, a [`~cache_utils.Cache`] instance.
+        parallelism_factor (float): The parallelism factor of the generation. Defaults to -1.0.
+    """
+
+    sequences: torch.LongTensor
+    scores: Optional[tuple[torch.FloatTensor]] = None
+    logits: Optional[tuple[torch.FloatTensor]] = None
+    attentions: Optional[tuple[tuple[torch.FloatTensor]]] = None
+    hidden_states: Optional[tuple[tuple[torch.FloatTensor]]] = None
+    past_key_values: Optional[Cache] = None
+    parallelism_factor: float = -1.0
 
 
 class MDLMConfig(DenoiserConfig):
@@ -518,11 +556,12 @@ class MDLM(Denoiser):
         stopping_criteria: Optional[StoppingCriteriaList] = None,
         max_length: Optional[int] = None,
         max_new_tokens: Optional[int] = None,
+        return_dict_in_generate: Optional[bool] = False,
         batch_size: Optional[int] = None,
         device: Optional[str] = None,
         tokenizer: Optional[PreTrainedTokenizer] = None,
         **kwargs: Any,
-    ) -> torch.LongTensor:
+    ) -> Union[torch.LongTensor, GenerateDecoderOnlyOutput]:
         # Setup sampling variables
         if generation_config is None:
             assert getattr(self, "generation_config", None) is not None, (
@@ -691,10 +730,13 @@ class MDLM(Denoiser):
         parallelism_factor = sum(num_tokens_generated_per_step) / len(
             num_tokens_generated_per_step
         )
-        return {
-            "outputs": accumulated_samples,
-            "parallelism_factor": parallelism_factor,
-        }  # type: ignore
+        if getattr(self, "return_parallelism_factor", False):
+            return DiffusionGenerationOutput(
+                sequences=accumulated_samples,
+                parallelism_factor=parallelism_factor,
+            )
+        else:
+            return accumulated_samples  # type: ignore
 
 
 class BD3LMConfig(MDLMConfig):

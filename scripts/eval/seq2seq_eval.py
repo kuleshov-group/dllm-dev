@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, DistributedSampler
 from tqdm.auto import tqdm
 from transformers import AutoModelForCausalLM, AutoModelForMaskedLM
 from transformers.generation import StopStringCriteria
+from transformers.modeling_outputs import ModelOutput
 
 from scripts.utils import (
     count_parameters,
@@ -163,11 +164,9 @@ def main(cfg: DictConfig) -> None:
                 # tokenizer=tokenizer,  # For debugging: prints intermediate generation
                 **gen_kwargs,
             )
-            if isinstance(generation_outputs, dict):
-                assert "outputs" in generation_outputs, "generation_outputs must contain 'outputs' key if it is a dict"
-                outputs = generation_outputs["outputs"]
-                if "parallelism_factor" in generation_outputs:
-                    parallelism_factor = generation_outputs["parallelism_factor"]
+            if isinstance(generation_outputs, ModelOutput):
+                outputs = generation_outputs.sequences
+                parallelism_factor = generation_outputs.get("parallelism_factor", -1.0)
             else:
                 outputs = generation_outputs
                 parallelism_factor = -1.0
