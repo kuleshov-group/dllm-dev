@@ -163,7 +163,7 @@ class DiffusionGenerationOutput(GenerateDecoderOnlyOutput):
     attentions: Optional[tuple[tuple[torch.FloatTensor]]] = None
     hidden_states: Optional[tuple[tuple[torch.FloatTensor]]] = None
     past_key_values: Optional[Cache] = None
-    parallelism_factor: float = -1.0
+    parallelism_factor: Optional[float] = -1.0
 
 
 class MDLMConfig(DenoiserConfig):
