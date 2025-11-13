@@ -11,7 +11,6 @@ from transformers import (
     StoppingCriteriaList,
 )
 from transformers.cache_utils import Cache, DynamicCache
-from transformers.generation.utils import GenerateOutput
 from transformers.modeling_outputs import ModelOutput
 
 try:
@@ -130,7 +129,7 @@ class DiffusionGenerationConfig(GenerationConfig):
 
 
 @dataclass
-class DiffusionGenerationOutput(GenerateOutput):
+class DiffusionGenerationOutput(ModelOutput):
     """
     Outputs of decoder-only generation models, when using non-beam methods.
 
