@@ -590,6 +590,7 @@ class MDLM(Denoiser):
             leave=True,
             disable=disable_pbar,
         )
+        num_tokens_generated_per_step = []
         for block_id in block_pbar:
             block_NFEs = 0
             xt = accumulated_samples[
@@ -643,9 +644,14 @@ class MDLM(Denoiser):
                     tokenizer=tokenizer,
                     **kwargs,
                 )
+                num_tokens_generated_per_step.append(
+                    (xs != denoiser_inputs.xt).sum().item()
+                )
                 block_pbar.set_postfix(
                     NFEs=total_NFEs,
                     block_NFEs=block_NFEs,
+                    paralleism=sum(num_tokens_generated_per_step)
+                    / len(num_tokens_generated_per_step),
                 )
 
                 if not torch.allclose(xs, denoiser_inputs.xt):
@@ -682,7 +688,13 @@ class MDLM(Denoiser):
                     inputs=xt,
                     cache=cache,
                 )
-        return accumulated_samples  # type: ignore
+        parallelism_factor = sum(num_tokens_generated_per_step) / len(
+            num_tokens_generated_per_step
+        )
+        return {
+            "outputs": accumulated_samples,
+            "parallelism_factor": parallelism_factor,
+        }  # type: ignore
 
 
 class BD3LMConfig(MDLMConfig):
@@ -1386,7 +1398,7 @@ class E2D2(BD3LM):
             decoder_attention_mask = self.static_attention_mask[
                 None,
                 None,
-                cache_length : full_seq_length,
+                cache_length:full_seq_length,
                 :full_seq_length,
             ]
             decoder_attention_mask.fill_(1)
