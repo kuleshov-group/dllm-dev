@@ -1,9 +1,29 @@
 defaults:
   - base@_here_
   - _self_
-
-tasks: 'gsm8k'
-system_instruction: null  # TODO: Can we use this instead of tokenizer
-apply_chat_template: false  # TODO: Can we use this instead of tokenizer
+tasks:
+  # Inherit from base task https://github.com/EleutherAI/lm-evaluation-harness/blob/68b03658ace40fa93221518b30096485a2387c58/lm_eval/tasks/gsm8k/gsm8k-cot-zeroshot.yaml
+  - task: gsm8k_cot_zeroshot
+    doc_to_text: "Please reason step by step, and put your final answer within $\\boxed{}$. Question: {{question}}\nAnswer: "
+    doc_to_target: "{{answer.split('### ')[-1].rstrip()}}"
+    filter_list:
+      - name: "boxed-match"
+        filter:
+          - function: "regex"
+            regex_pattern: "boxed\\{(\\-?[0-9\\.\\,]+)\\}"
+          - function: "take_first"
+      - name: "strict-match"
+        filter:
+          - function: "regex"
+            regex_pattern: "### (\\-?[0-9\\.\\,]+)"
+          - function: "take_first"
+      - name: "flexible-extract"
+        filter:
+          - function: "regex"
+            group_select: -1
+            regex_pattern: "(-?[$0-9.,]{2,})|(-?[0-9]+)"
+          - function: "take_first"
+system_instruction: null
+apply_chat_template: false
 model:
   gen_kwargs: ${gen_kwargs}

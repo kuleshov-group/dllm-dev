@@ -2,13 +2,11 @@
 _target_: lm_eval.evaluator.simple_evaluate
 tasks: ???
 num_fewshot: 0
+limit: null # Override with CLI for testing, e.g., `task.limit=10`
 batch_size: 1
-#evaluation_tracker:  # TODO: throwing error b/c model_args not used so cannot find model name
-#  _target_: lm_eval.loggers.evaluation_tracker.EvaluationTracker
-#  output_path: ${output_path}
 log_samples: true
-system_instruction: null  # TODO: Can we use this instead of tokenizer
-apply_chat_template: false  # TODO: Can we use this instead of tokenizer
+system_instruction: null
+apply_chat_template: false
 random_seed: ${seed}
 numpy_random_seed: ${.random_seed}
 torch_random_seed: ${.random_seed}

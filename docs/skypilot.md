@@ -22,10 +22,13 @@ mkdir -p ~/.lambda_cloud
 echo "api_key = <your_api_key_here>" > ~/.lambda_cloud/lambda_keys
 
 # Pin uvicorn version bound to avoid: https://github.com/skypilot-org/skypilot/issues/7287
-pip install skypilot[lambda] uvicorn==0.35.0
+pip install skypilot[lambda]
 
 # Deploy a single A100 node
 sky launch --infra lambda --cluster dllm --gpus A100 --disk-size 100
+
+# To sync code in your current directory (i.e. this repo) to the node, specify a workdir:
+sky launch --infra lambda --cluster dllm --gpus A100 --disk-size 100 --workdir .
 ```
 
 Then you can ssh to the node via `ssh dllm`, or whatever "cluster name" you chose.  If your cluster is more than one node, the rest will be named like `dllm-worker1`, `dllm-worker2`, etc. as hosts in your SSH config.
@@ -116,7 +119,8 @@ Notably, this will take your W&B and HuggingFace tokens from your local machine 
 
 ```bash
 # Launch the single-node cluster
-sky launch --cluster dllm cluster.sky.yaml
+sky launch --cluster dllm cluster.sky.yaml \
+  --env HUGGING_FACE_HUB_TOKEN --env WANDB_API_KEY
 
 # Define the task to run
 cat << 'EOF' > task.sky.yaml
