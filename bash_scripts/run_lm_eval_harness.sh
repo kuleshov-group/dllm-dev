@@ -31,8 +31,7 @@ NUM_FEW_SHOT=0
 
 ######## E2D2
 MODEL_PATH="kuleshov-group/e2d2-gsm8k-finetune-Qwen3-2B"
-# MODEL_PATH="${RUN_DIR}/<PATH_TO_E2D2_SAVED_MODEL_DIR>"
-BLOCK_SIZE=4
+BLOCK_SIZE=32
 KV_CACHING=true
 ALIGN_INPUTS_TO_BLOCKS=true
 USE_EMA=true
@@ -51,7 +50,6 @@ CONFIDENCE_THRESHOLD=1e6
 CKPT="best"
 
 
-OUTPUT_PATH="${OUTPUT_DIR}/L-${L}-block_size-${BLOCK_SIZE}-do_sample-${DO_SAMPLE}-sampling_strategy-${SAMPLING_STRATEGY}-first_hitting-${FIRST_HITTING}-confidence_based_noising-${CONFIDENCE_BASED_NOISING}-align_inputs_to_blocks${ALIGN_INPUTS_TO_BLOCKS}-ckpt${CKPT}-ema${USE_EMA}rep-penalty-${REPETITION_PENALTY}_len-penalty-${LEN_PENALTY}_reg-start${REGULATION_START}"
 OUTPUT_PATH="${OUTPUT_DIR}/ema${USE_EMA}_ckpt${CKPT}_${NUM_FEW_SHOT}shot_L${L}_block${BLOCK_SIZE}-do_sample${DO_SAMPLE}-sampling_strategy${SAMPLING_STRATEGY}-T${T}_first_hit${FIRST_HITTING}-conf_noise${CONFIDENCE_BASED_NOISING}-conf_margin_noise${CONFIDENCE_MARGIN_BASED_NOISING}-conf_thold${CONFIDENCE_THRESHOLD}-align_to_blocks${ALIGN_INPUTS_TO_BLOCKS}"
 mkdir -p ${OUTPUT_PATH}
 
@@ -66,6 +64,7 @@ accelerate launch scripts/eval/harness_eval.py \
   pretrained_model_revision=${REVISION} \
   task.model.ckpt_file="${CKPT}-rank0.pt" \
   task.model.load_ema_weights=${USE_EMA} \
+  +task.model.model_config_overrides.block_size=${BLOCK_SIZE} \
   tokenizer.pretrained_model_name_or_path=${QWEN_MODEL} \
   output_path=${OUTPUT_PATH} \
   generated_samples_output_path=${OUTPUT_PATH} \
