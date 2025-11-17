@@ -28,15 +28,10 @@ OUTPUT_DIR="outputs/distillation/${MODEL_PATH##*/}/${DATASET_CONFIG}"
 OUTPUT_PATH="${OUTPUT_DIR}/L-${L}-do_sample-${DO_SAMPLE}"
 mkdir -p ${OUTPUT_PATH}
 
-# Distributed training setup
-NUM_VISIBLE_DEVICES=${NUM_VISIBLE_DEVICES:-1}  # Number of GPUs to use
 PORT=29500
 
 SYSTEM_PROMPT="Please reason step by step, and put your final answer within $\\boxed{}$."
 
-# Run the collection script
-# Set LOG_LEVEL to WARNING or ERROR to disable INFO logging (options: DEBUG, INFO, WARNING, ERROR, CRITICAL)
-export LOG_LEVEL=${LOG_LEVEL:-WARNING}  # Default to WARNING to suppress INFO logs
 torchrun --nproc_per_node ${NUM_VISIBLE_DEVICES} --master_port=${PORT} scripts/dump_targets.py \
   hydra.output_subdir=null \
   hydra.run.dir="${PWD}" \
