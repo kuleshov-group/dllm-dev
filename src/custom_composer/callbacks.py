@@ -7,6 +7,7 @@ import time
 from typing import Any, Literal
 
 import torch
+import torch.distributed as torch_dist
 import wandb
 from composer import TimeUnit
 from composer.callbacks import CheckpointSaver
@@ -503,13 +504,123 @@ class LogGradientNorms(Callback):
         # Log total gradient norm across all non-embedding parameters
         total_norm = total_norm ** (1.0 / 2)
         if self.include_embedding_params:
-            metrics["grad_norm/total"] = total_norm
+            metrics["grad_stats/norm"] = total_norm
         else:
-            metrics["grad_norm/total_non_embedding"] = total_norm
+            metrics["grad_stats/norm_non_embedding"] = total_norm
 
         if metrics:
             logger.log_metrics(metrics)
 
+
+class LogGradientVariance(Callback):
+    """Log gradient variance across multiple steps.
+
+    This callback accumulates gradients over n user-specified steps, then computes
+    and logs the variance of gradients across those steps. After logging, it clears
+    the accumulated gradients cache. Accounts for distributed training by syncing
+    gradients across ranks before computing variance.
+    """
+
+    def __init__(
+        self,
+        accumulation_steps: int = 10,
+        log_frequency: int = 1,
+        include_embedding_params: bool = False,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        super().__init__(*args, **kwargs)
+        self.accumulation_steps = accumulation_steps
+        self.log_frequency = log_frequency
+        self.include_embedding_params = include_embedding_params
+        self.step_count = 0
+        # Store accumulated gradients: list of dicts, each dict maps param_name -> gradient tensor
+        self.accumulated_grads: list[dict[str, torch.Tensor]] = []
+
+    @staticmethod
+    def _is_embedding_param(param_name: str) -> bool:
+        """Check if a parameter is an embedding parameter."""
+        return "embed" in param_name.lower()
+
+    @staticmethod
+    def _get_model(state: State):
+        """Get the model, handling wrapped models."""
+        if hasattr(state.model, "module"):
+            return state.model.module.model
+        return state.model.model
+
+    def after_train_batch(self, state: State, logger: Logger) -> None:
+        """Accumulate gradients and log variance across steps."""
+        self.step_count += 1
+        if self.step_count % self.log_frequency != 0:
+            return
+
+        model = self._get_model(state)
+
+        # Collect current gradients
+        current_grads = {}
+        for name, param in model.named_parameters():
+            if param.grad is not None and (
+                self.include_embedding_params or not self._is_embedding_param(name)
+            ):
+                # Clone and detach to avoid keeping references to computation graph
+                current_grads[name] = param.grad.data.clone().detach()
+
+        # Accumulate gradients
+        self.accumulated_grads.append(current_grads)
+
+        # Check if we've accumulated enough steps
+        if len(self.accumulated_grads) >= self.accumulation_steps:
+            metrics = self._compute_variance_across_steps()
+
+            # Log metrics (logger handles rank 0 logging automatically)
+            if metrics:
+                logger.log_metrics(metrics)
+
+            # Clear accumulated gradients cache
+            self.accumulated_grads.clear()
+
+    def _compute_variance_across_steps(self) -> dict[str, float]:
+        """Compute variance of gradients across accumulated steps."""
+        if len(self.accumulated_grads) == 0:
+            return {}
+
+        # Get all parameter names from the first step
+        param_names = set(self.accumulated_grads[0].keys())
+
+        metrics = {}
+        total_variance = 0.0
+        num_params = 0
+
+        for name in param_names:
+            # Collect gradients for this parameter across all steps
+            param_grads_across_steps = []
+            for step_grads in self.accumulated_grads:
+                if name in step_grads:
+                    # Flatten the gradient tensor
+                    param_grads_across_steps.append(step_grads[name].flatten())
+
+            if len(param_grads_across_steps) > 0:
+                # Stack gradients across steps: shape [num_steps, num_elements]
+                stacked_grads = torch.stack(param_grads_across_steps, dim=0)
+
+                # Compute variance across steps for each element, then average
+                # This gives us the mean variance of gradient elements across steps
+                element_variances = stacked_grads.var(dim=0, unbiased=True)
+                param_variance = element_variances.mean().item()
+
+                total_variance += param_variance
+                num_params += 1
+
+        # Average variance across all parameters
+        if num_params > 0:
+            avg_variance = total_variance / num_params
+            if self.include_embedding_params:
+                metrics["grad_stats/variance"] = avg_variance
+            else:
+                metrics["grad_stats/variance_non_embedding"] = avg_variance
+
+        return metrics
 
 class WarmupWithFrozenEncoder(Callback):
     def __init__(
