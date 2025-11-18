@@ -1,5 +1,5 @@
 import logging
-from typing import Any, List, Literal, Union
+from typing import Any, List, Literal, Optional, Union
 
 from composer import Event, Logger, State, Time, TimeUnit
 from composer.algorithms.ema import EMA
@@ -111,6 +111,7 @@ class BlockSizeAnnealing(Algorithm):
         # Execute the "deferred" `apply`
         if event == Event.EVAL_AFTER_ALL and self._increase_deferred_until_eval_end:
             self._increase_deferred_until_eval_end = False  # reset
+            log.info("Executing deferred block size increase.")
             return True
 
         # Currently, only batch or epoch are supported for scheduling increase
@@ -124,6 +125,7 @@ class BlockSizeAnnealing(Algorithm):
                     # If trainer will execute eval, wait to apply block increase until
                     # after eval loop end
                     if _is_eval_event(event, state):
+                        log.info("Deferring block size increase until end of eval.")
                         self._increase_deferred_until_eval_end = True
                         return False
                     return True
@@ -133,6 +135,7 @@ class BlockSizeAnnealing(Algorithm):
             # If trainer will execute eval, wait to apply block increase until after
             # eval loop end
             if _is_eval_event(event, state):
+                log.info("Deferring block size increase until end of eval.")
                 self._increase_deferred_until_eval_end = True
                 return False
             return True
@@ -146,15 +149,23 @@ class BlockSizeAnnealing(Algorithm):
         else:
             return state.model.model
 
-    def _increase_block_size(self, current_block_size):
+    def _maybe_increase_block_size(self, current_block_size):
+        if current_block_size >= self.max_block_size:
+            return current_block_size
         if self.increase_via_add_or_multiply == "add":
             return current_block_size + self.factor
         return current_block_size * self.factor
 
-    def _update_config_model_collators(self, state: State, new_block_size: int) -> None:
+    def _maybe_update_config_model_collators(
+        self,
+        state: State,
+        new_block_size: Optional[int] = None,
+    ) -> int:
         model = self._select_model_from_state(state)
-        if model.config.block_size >= self.max_block_size:
-            return
+        if new_block_size is None:
+            new_block_size = self._maybe_increase_block_size(model.config.block_size)
+        if model.config.block_size >= new_block_size:
+            return model.config.block_size
         # Update model config
         model.config.block_size = new_block_size
         # Update model
@@ -172,23 +183,25 @@ class BlockSizeAnnealing(Algorithm):
         for e in state.evaluators:
             if new_block_size != e.dataloader.dataloader.collate_fn.block_size:
                 e.dataloader.dataloader.collate_fn.update_block_size(new_block_size)
+        return new_block_size
 
     def apply(self, event: Event, state: State, logger: Logger) -> None:
         if event == Event.AFTER_LOAD:
             if self.block_size > 0:
-                self._update_config_model_collators(state, self.block_size)
-                log.info(f"Restored block size value to {self.block_size}.")
+                restored_block_size = self._maybe_update_config_model_collators(
+                    state,
+                    self.block_size,
+                )
+                self.block_size = restored_block_size
+                log.info(f"Restored block size value to {restored_block_size}.")
             else:
                 model = self._select_model_from_state(state)
                 self.block_size = model.config.block_size
             return
-
-        model = self._select_model_from_state(state)
-        new_block_size = self._increase_block_size(model.config.block_size)
-        self._update_config_model_collators(state, new_block_size)
-        log.info(f"Block size updated: {self.block_size} --> {new_block_size}")
-        self.block_size = new_block_size
-        self._increase_deferred_until_eval_end = False
+        new_block_size = self._maybe_update_config_model_collators(state)
+        if new_block_size != self.block_size:
+            log.info(f"Block size updated: {self.block_size} --> {new_block_size}")
+            self.block_size = new_block_size
 
     def state_dict(self) -> dict[str, Any]:
         state_dict = super().state_dict()
