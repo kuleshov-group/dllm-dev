@@ -5,12 +5,14 @@ defaults:
     - gradient_clipping
     - set_fixed_rng_state_for_eval
     - block_size_annealing
+    - noise_level_annealing
   - overrides callbacks:
     - runtime_estimator
     - lr_monitor
     - speed_monitor
     - log_gradient_norms
     - log_block_size
+    - log_noise_level_annealing
     - hf_compatible_checkpointing
     - save_best_checkpointing
   - _self_

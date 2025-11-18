@@ -223,10 +223,13 @@ class NoiseLevelAnnealing(Algorithm):
         self.annealing_progress = 0.0
 
     def match(self, event: Event, state: State) -> bool:
+        if self.anneal_duration.value == 0:
+            return False
+
         if event == Event.AFTER_LOAD:
             return True
 
-        if _is_eval_event(event, state) or self.anneal_duration.value == 0:
+        if _is_eval_event(event, state):
             return False
 
         # Currently, only batch or epoch are supported for scheduling
