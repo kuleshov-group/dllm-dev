@@ -21,7 +21,7 @@ LR=1e-5
 WARMUP_DURATION="100ba"
 ALPHA_F=0.5
 BATCH_SIZE=1
-MAX_DURATION="100000ba"
+MAX_DURATION="80000ba"
 PRECISION="amp_bf16"
 
 PRETRAINED_MODEL_NAME_OR_PATH=Qwen/Qwen3-1.7B-Base
@@ -57,6 +57,7 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   pretrained_model_name_or_path=${PRETRAINED_MODEL_NAME_OR_PATH} \
   dataset@train_dataset=gsm8k_train_distill \
   dataset@eval_dataset=gsm8k_eval_distill \
+  composer=distill_composer \
   composer.optimizer.lr=${LR} \
   composer.trainer.precision=${PRECISION} \
   composer.trainer.eval_interval="1000ba" \
@@ -86,10 +87,12 @@ composer -n ${NUM_VISIBLE_DEVICES} scripts/composer_scripts/train_discrete_denoi
   hydra.run.dir=${RUN_DIR}/${RUN_NAME} \
   composer.callbacks.hf_compatible_checkpointing.save_interval="1000ba" \
   composer.callbacks.hf_compatible_checkpointing.num_checkpoints_to_keep=1 \
+  composer.callbacks.hf_compatible_checkpointing.disable_hf=true \
   composer.loggers.name=${RUN_NAME} \
   train_dataloader.num_workers=${NUM_WORKERS} \
-  composer.callbacks.hf_compatible_checkpointing.disable_hf=true \
   eval_dataloader.batch_size=8 \
   eval_evaluator.device_eval_microbatch_size=8 \
   model.config.train_on_context=${TRAIN_ON_CONTEXT} \
-  model.config.bidirectional_ctx_attn=false
+  model.config.bidirectional_ctx_attn=false \
+  composer.algorithms.block_size_annealing.schedule="1000ba" \
+  composer.callbacks.save_best_checkpointing.start="5000ba"
