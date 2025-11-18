@@ -135,26 +135,39 @@ class DiffusionGenerationOutput(ModelOutput):
 
     Args:
         sequences (`torch.LongTensor` of shape `(batch_size, sequence_length)`):
-            The generated sequences. The second dimension (sequence_length) is either equal to `max_length` or shorter
-            if all batches finished early due to the `eos_token_id`.
-        scores (`tuple(torch.FloatTensor)` *optional*, returned when `output_scores=True`):
-            Processed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
-            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
-        logits (`tuple(torch.FloatTensor)` *optional*, returned when `output_logits=True`):
-            Unprocessed prediction scores of the language modeling head (scores for each vocabulary token before SoftMax)
-            at each generation step. Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one element for
-            each generated token), with each tensor of shape `(batch_size, config.vocab_size)`.
-        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_attentions=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, num_heads, generated_length, sequence_length)`.
-        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when `output_hidden_states=True`):
-            Tuple (one element for each generated token) of tuples (one element for each layer of the decoder) of
-            `torch.FloatTensor` of shape `(batch_size, generated_length, hidden_size)`.
+            The generated sequences. The second dimension (sequence_length) is either
+            equal to `max_length` or shorter if all batches finished early due to the
+            `eos_token_id`.
+        scores (`tuple(torch.FloatTensor)` *optional*, returned when
+            `output_scores=True`):
+            Processed prediction scores of the language modeling head (scores for each
+            vocabulary token before SoftMax) at each generation step.
+            Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one
+            element for each generated token), with each tensor of shape
+            `(batch_size, config.vocab_size)`.
+        logits (`tuple(torch.FloatTensor)` *optional*, returned when
+            `output_logits=True`):
+            Unprocessed prediction scores of the language modeling head (scores for each
+            vocabulary token before SoftMax) at each generation step.
+            Tuple of `torch.FloatTensor` with up to `max_new_tokens` elements (one
+            element for each generated token), with each tensor of shape
+            `(batch_size, config.vocab_size)`.
+        attentions (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when
+            `output_attentions=True`):
+            Tuple (one element for each generated token) of tuples (one element for each
+            layer of the decoder) of `torch.FloatTensor` of shape
+            `(batch_size, num_heads, generated_length, sequence_length)`.
+        hidden_states (`tuple(tuple(torch.FloatTensor))`, *optional*, returned when
+            `output_hidden_states=True`):
+            Tuple (one element for each generated token) of tuples (one element for each
+            layer of the decoder) of `torch.FloatTensor` of shape
+            `(batch_size, generated_length, hidden_size)`.
         past_key_values (`Cache`, *optional*, returned when `use_cache=True`):
-            Returns the model cache, used to speed up decoding. Different models have a different cache format, check
-            the model's documentation. Usually, a [`~cache_utils.Cache`] instance.
-        parallelism_factor (float): The parallelism factor of the generation. Defaults to -1.0.
+            Returns the model cache, used to speed up decoding. Different models have a
+            different cache format, check the model's documentation.
+            Usually, a [`~cache_utils.Cache`] instance.
+        parallelism_factor (float): The parallelism factor of the generation.
+            Defaults to -1.0.
     """
 
     sequences: torch.LongTensor
@@ -864,7 +877,9 @@ class BD3LM(MDLM):
             self.static_attention_mask = new_static_mask
 
     def _maybe_update_attention_mask(self, max_length: Optional[int] = None) -> None:
-        # NOTE: Only update the attention mask if the length is greater than the current length. Does not account for block size.
+        # NOTE: Only update the attention mask if the length is greater than the current
+        # length.
+        # Does not account for block size.
         if max_length is None:
             max_length = self.config.length
         if (self.static_attention_mask.shape[-1] // 2) < max_length:
@@ -1226,7 +1241,9 @@ class E2D2(BD3LM):
             self.static_attention_mask.copy_(new_static_mask[1])
 
     def _maybe_update_attention_mask(self, max_length: Optional[int] = None) -> None:
-        # NOTE: Only update the attention mask if the length is greater than the current length. Does not account for block size.
+        # NOTE: Only update the attention mask if the length is greater than the current
+        # length.
+        # Does not account for block size.
         if max_length is None:
             max_length = self.config.length
         if self.encoder_static_attention_mask.shape[-1] < max_length:
@@ -1366,7 +1383,7 @@ class E2D2(BD3LM):
         **backbone_kwargs: Dict[str, Any],
     ) -> Tuple[DenoiserInput, Union[Dict[str, Any], None]]:
         device = input_ids.device if input_ids is not None else context.device
-        batch_size = input_ids.shape[0] if input_ids is not None else context.shape[0]
+        # batch_size = input_ids.shape[0] if input_ids is not None else context.shape[0]
         assert input_ids is not None or context is not None, (
             "Must provide either input_ids or context."
         )

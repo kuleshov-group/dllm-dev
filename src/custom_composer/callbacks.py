@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import torch
 import wandb
+from composer import TimeUnit
 from composer.callbacks import CheckpointSaver
 from composer.core import Callback, State, Time, Timestamp
 from composer.loggers import Logger
@@ -253,6 +254,7 @@ class SaveBestCheckpointing(HuggingFaceCompatibleCheckpointing):
         save_local: bool = True,
         save_to_hub: bool = False,
         hub_repo_id: str | None = None,
+        start: str = "0.0dur",
         *args: Any,
         **kwargs: Any,
     ) -> None:
@@ -265,6 +267,9 @@ class SaveBestCheckpointing(HuggingFaceCompatibleCheckpointing):
         self.metric_name = "/".join(metric_to_monitor.split("/")[1:])
         self.mode = mode
         self.best_value = None
+        # Convert start time to a time object
+        self.start = Time.from_timestring(start)
+        self.started = False
 
         self.latest_filename = None
         self.latest_hf_filename = None
@@ -292,6 +297,19 @@ class SaveBestCheckpointing(HuggingFaceCompatibleCheckpointing):
             "best_value": self.best_value,
         }
 
+    def _should_start(self, state: State) -> bool:
+        if self.start.unit == TimeUnit.DURATION:
+            current_time = state.get_elapsed_duration()
+            if current_time is not None:
+                should_start = self.start <= current_time
+            else:
+                should_start = False
+        else:
+            current_time = state.timestamp.get(self.start.unit).value
+            should_start = self.start.value <= current_time
+
+        return should_start
+
     def _trigger_save(self, metric_value: float) -> bool:
         if self.best_value is None:
             return True
@@ -300,6 +318,10 @@ class SaveBestCheckpointing(HuggingFaceCompatibleCheckpointing):
         return metric_value > self.best_value  # self.mode == "max"
 
     def eval_end(self, state: State, logger: Logger) -> None:
+        if not self.started:
+            self.started = self._should_start(state)
+        if not self.started:
+            return
         metrics = (
             state.train_metric_values
             if self.train_or_eval == "train"
