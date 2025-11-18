@@ -116,7 +116,7 @@ class DenoisingCollator:
                     device="cpu",
                 )
 
-    def update_noise_schedule(self, annealing_progress: float) -> None:
+    def update_max_noise_level(self, annealing_progress: float) -> None:
         self.restricted_t_range = (
             0,
             torch.linspace(1, annealing_progress, self.block_size),

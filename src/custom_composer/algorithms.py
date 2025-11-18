@@ -250,7 +250,7 @@ class NoiseLevelAnnealing(Algorithm):
         annealing_progress = min(1.0, current_time / self.anneal_duration.value)
         self.annealing_progress = annealing_progress
         # Update train collators' noise schedule
-        state.train_dataloader.collate_fn.update_noise_schedule(annealing_progress)
+        state.train_dataloader.collate_fn.update_max_noise_level(annealing_progress)
 
     def state_dict(self) -> dict[str, Any]:
         state_dict = super().state_dict()
