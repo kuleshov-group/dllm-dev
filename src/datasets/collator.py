@@ -229,3 +229,78 @@ class ConcatenatedSequenceCollatorWrapper:
         batch = self.base_collator(features)
         batch["sequence_id"] = self.get_sequence_id_from_batch(batch)
         return batch
+
+
+class DumpTargetsCollator:
+    """Collator that dumps targets to a file."""
+
+    def __init__(
+        self,
+        tokenizer: PreTrainedTokenizerBase,
+        rank: int = 0,
+        world_size: int = 1,
+        padding: bool = True,
+        max_length: int | None = None,
+        pad_to_multiple_of: int | None = None,
+        return_tensors: str = "pt",
+        base_collator: Callable | None = None,
+    ):
+        """
+        Parameters:
+            tokenizer (PreTrainedTokenizerBase): Tokenizer used in base collator
+            rank (int): Used for sampling t.
+            world_size (int): Used for sampling t.
+            padding (bool; default: True): Whether to pad the sequences
+            max_length: (Optional: int): Maximum length of the sequences.
+            pad_to_multiple_of: (Optional: int): if specified,
+                pad sequences to a multiple of this value.
+            return_tensors: (str; default: "pt"): Format of the returned tensors.
+            base_collator (Optional: Callable): The base collator that is being wrapped.
+                If None, defaults to transformers.DataCollatorWithPadding.
+        """
+        if base_collator is not None:
+            self.base_collate_fn = base_collator
+        else:
+            self.base_collate_fn = DataCollatorWithPadding(
+                tokenizer=tokenizer,
+                padding=padding,
+                max_length=max_length,
+                pad_to_multiple_of=pad_to_multiple_of,
+                return_tensors=return_tensors,
+            )
+        self.padding_side = tokenizer.padding_side
+        self.max_length = max_length
+        self._rank = rank
+        self._world_size = world_size
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        # Remove labels from each example
+        truncated_features = []
+        for feature in features:
+            attention_mask = feature.get("attention_mask", None)
+            context_mask = feature.get("context_mask", None)
+            if attention_mask is not None and context_mask is not None:
+                label_mask = attention_mask * (1 - context_mask)
+                if label_mask.sum() > 0:
+                    first_label_index = label_mask.nonzero(as_tuple=True)[0][0]
+                    feature["input_ids"] = feature["input_ids"][:first_label_index]
+                    if attention_mask is not None:
+                        feature["attention_mask"] = attention_mask[:first_label_index]
+                    if context_mask is not None:
+                        feature["context_mask"] = context_mask[:first_label_index]
+                    truncated_features.append(feature)
+        context_mask = [f.pop("context_mask", None) for f in truncated_features]
+        batch = self.base_collate_fn(truncated_features)
+        if all([c is not None for c in context_mask]):
+            context_mask = torch.nn.utils.rnn.pad_sequence(
+                context_mask,  # type: ignore
+                batch_first=True,
+            )[..., : self.max_length]
+            context_mask = torch.nn.functional.pad(
+                context_mask,
+                (0, self.max_length - context_mask.shape[-1])
+                if self.padding_side == "right"
+                else (self.max_length - context_mask.shape[-1], 0),
+            )
+            batch.update({"context_mask": context_mask})
+        return batch
