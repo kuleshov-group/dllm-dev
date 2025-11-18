@@ -12,7 +12,7 @@ For Lambda, e.g., this is all it takes to create a single A100 node for developm
 
 ```bash
 pip install skypilot[lambda]
-sky launch --cluster dllm --gpus A100
+sky launch --cluster dllm --gpus A100 --workdir .
 ssh dllm # sky creates ssh configs for you
 ```
 

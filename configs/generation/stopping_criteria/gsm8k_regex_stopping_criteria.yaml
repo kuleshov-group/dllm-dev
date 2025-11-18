@@ -2,4 +2,5 @@ gsm8k_regex_stopping_criteria:
   _target_: src.custom_transformers.generation.RegexStoppingCriteria
   tokenizer: ${tokenizer}
   pattern: '\\boxed\{.*?\}'
+  # TODO: why 2 matches instead of 1?
   num_matches: 2
