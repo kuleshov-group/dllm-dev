@@ -894,16 +894,16 @@ class BD3LM(MDLM):
     ) -> torch.Tensor:
         n_blocks = xt.shape[1] // self.config.block_size
         masked_tokens_mask = xt == self.mask_token_id
+        # If context overlaps w/block, ignore it
         if context_mask is not None:
             masked_tokens_mask = masked_tokens_mask | context_mask
-        # If context overlaps w/block, ignore it
         blocks_without_masks = (
             masked_tokens_mask.reshape(-1, n_blocks, self.config.block_size).sum(dim=-1)
             == 0
         )
         if blocks_without_masks.sum() > 0:
             t = t.reshape(xt.shape[0] * n_blocks, self.config.block_size)
-            # Mask tokens with the highest t value in each block (for multivariate schedules)
+            # Mask tokens with the highest t in each block (for multivariate schedules)
             max_t_mask = torch.zeros_like(t, dtype=torch.bool)
             max_t_mask.scatter_(1, t.argmax(dim=-1, keepdim=True), True)
             rand = torch.rand(
