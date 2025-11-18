@@ -889,30 +889,33 @@ class BD3LM(MDLM):
         self,
         input_ids: torch.LongTensor,
         xt: torch.LongTensor,
+        t: torch.FloatTensor,
         context_mask: Optional[torch.FloatTensor] = None,
     ) -> torch.Tensor:
         n_blocks = xt.shape[1] // self.config.block_size
+        masked_tokens_mask = xt == self.mask_token_id
+        if context_mask is not None:
+            masked_tokens_mask = masked_tokens_mask | context_mask
         # If context overlaps w/block, ignore it
-        blocks_without_masks = ((xt == self.mask_token_id) + context_mask).reshape(
-            -1, n_blocks, self.config.block_size
-        ).sum(dim=-1) == 0
+        blocks_without_masks = (
+            masked_tokens_mask.reshape(-1, n_blocks, self.config.block_size).sum(dim=-1)
+            == 0
+        )
         if blocks_without_masks.sum() > 0:
-            num_remasks_per_block = torch.randint(
-                0,
-                self.config.block_size,
-                blocks_without_masks.shape,
-                device=xt.device,
+            t = t.reshape(xt.shape[0] * n_blocks, self.config.block_size)
+            # Mask tokens with the highest t value in each block (for multivariate schedules)
+            max_t_mask = torch.zeros_like(t, dtype=torch.bool)
+            max_t_mask.scatter_(1, t.argmax(dim=-1, keepdim=True), True)
+            rand = torch.rand(
+                xt.shape[0] * n_blocks, self.config.block_size, device=xt.device
             )
-            rand = torch.rand(xt.shape[0], xt.shape[1], device=xt.device)
-            perm_indices = torch.argsort(
-                rand.view(xt.shape[0], n_blocks, self.config.block_size),
-                stable=True,
-                dim=-1,
-            )
-            remask_indices = perm_indices <= num_remasks_per_block[..., None]
+            rand[~max_t_mask] = -float("inf")
+            # Select exactly one index per row to mask (leftmost in case of ties)
+            remask_indices = torch.zeros_like(rand, dtype=torch.bool)
+            remask_indices.scatter_(1, rand.argmax(dim=-1, keepdim=True), True)
+            remask_indices[blocks_without_masks.view(-1) == False] = False
             xt = torch.where(
-                remask_indices.view(xt.shape[0], xt.shape[1])
-                * blocks_without_masks.repeat_interleave(self.config.block_size, dim=1),
+                remask_indices.view(xt.shape[0], xt.shape[1]),
                 self.mask_token_id,
                 xt,
             )
@@ -956,6 +959,7 @@ class BD3LM(MDLM):
             xt = self._ensure_no_unmasked_blocks(
                 input_ids,
                 xt,
+                t,
                 context_mask,
             )
         if self.config.attn_backend == "sdpa":
@@ -1285,6 +1289,7 @@ class E2D2(BD3LM):
             xt = self._ensure_no_unmasked_blocks(
                 input_ids,
                 xt,
+                t,
                 context_mask,
             )
         if self.config.attn_backend == "sdpa":

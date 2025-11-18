@@ -234,7 +234,7 @@ class NoiseLevelAnnealing(Algorithm):
             return False
 
         current_time = state.timestamp.get(self.anneal_duration.unit).value
-        if current_time < self.anneal_duration.value:
+        if current_time <= self.anneal_duration.value:
             return True
         return False
 
