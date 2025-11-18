@@ -806,7 +806,9 @@ class BD3LM(MDLM):
             self.static_attention_mask = new_static_mask
 
     def _maybe_update_attention_mask(self, max_length: Optional[int] = None) -> None:
-        # NOTE: Only update the attention mask if the length is greater than the current length. Does not account for block size.
+        # NOTE: Only update the attention mask if the length is greater than the current
+        # length.
+        # Does not account for block size.
         if max_length is None:
             max_length = self.config.length
         if (self.static_attention_mask.shape[-1] // 2) < max_length:
@@ -1168,7 +1170,9 @@ class E2D2(BD3LM):
             self.static_attention_mask.copy_(new_static_mask[1])
 
     def _maybe_update_attention_mask(self, max_length: Optional[int] = None) -> None:
-        # NOTE: Only update the attention mask if the length is greater than the current length. Does not account for block size.
+        # NOTE: Only update the attention mask if the length is greater than the current
+        # length.
+        # Does not account for block size.
         if max_length is None:
             max_length = self.config.length
         if self.encoder_static_attention_mask.shape[-1] < max_length:
@@ -1224,7 +1228,7 @@ class E2D2(BD3LM):
                     encoder_attention_mask | context_mask[:, None, :]
                 )
             encoder_attention_mask = (
-                encoder_attention_mask[None, ...]
+                encoder_attention_mask
                 & attention_mask[:, None, :]
                 & attention_mask[..., None]
             )[:, None, ...]  # Make attention mask 4D
@@ -1308,7 +1312,7 @@ class E2D2(BD3LM):
         **backbone_kwargs: Dict[str, Any],
     ) -> Tuple[DenoiserInput, Union[Dict[str, Any], None]]:
         device = input_ids.device if input_ids is not None else context.device
-        batch_size = input_ids.shape[0] if input_ids is not None else context.shape[0]
+        # batch_size = input_ids.shape[0] if input_ids is not None else context.shape[0]
         assert input_ids is not None or context is not None, (
             "Must provide either input_ids or context."
         )
@@ -1386,7 +1390,7 @@ class E2D2(BD3LM):
             decoder_attention_mask = self.static_attention_mask[
                 None,
                 None,
-                cache_length : full_seq_length,
+                cache_length:full_seq_length,
                 :full_seq_length,
             ]
             decoder_attention_mask.fill_(1)
