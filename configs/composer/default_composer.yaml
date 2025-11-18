@@ -5,11 +5,13 @@ defaults:
     - ema
     - gradient_clipping
     - set_fixed_rng_state_for_eval
+    - noise_level_annealing
   - callbacks:
       - runtime_estimator
       - lr_monitor
       - speed_monitor
       - log_gradient_norms
+      - log_noise_level_annealing
       - hf_compatible_checkpointing
       - save_best_checkpointing
   - loggers: wandb

@@ -451,6 +451,19 @@ class LogBlockSize(Callback):
         logger.log_metrics({"block_size": block_size})
 
 
+class LogNoiseLevelAnnealing(Callback):
+    def batch_end(self, state: State, logger: Logger) -> None:
+        restricted_t_range = state.train_dataloader.collate_fn.restricted_t_range
+        annealing_enabled = restricted_t_range is not None and isinstance(
+            restricted_t_range[-1], torch.Tensor
+        )
+        if not annealing_enabled:
+            return
+        logger.log_metrics(
+            {"noise_level_annealing_progress": restricted_t_range[1][-1].item()}
+        )
+
+
 class LogGradientNorms(Callback):
     """Log gradient norms of non-embedding parameters.
 

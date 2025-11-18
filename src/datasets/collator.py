@@ -20,7 +20,9 @@ class DenoisingCollator:
         pad_to_multiple_of: int | None = None,
         return_tensors: str = "pt",
         predict_padding: bool = False,
-        restricted_t_range: tuple[float, float] | None = None,
+        restricted_t_range: tuple[float, float]
+        | tuple[torch.Tensor, torch.Tensor]
+        | None = None,
         sampling_eps: float = 0.05,
         antithetic_sampling: bool = False,
         block_size: int | None = None,
@@ -41,9 +43,9 @@ class DenoisingCollator:
                 pad sequences to a multiple of this value.
             return_tensors: (str; default: "pt"): Format of the returned tensors.
             predict_padding (bool; default: False): Whether to predict padding tokens.
-            restricted_t_range (Optional: tuple[min: float, max: float]): If specified,
-                sampling of timestep (t) sampling is restricted to [min, max] range,
-                as opposed to [0, 1].
+            restricted_t_range (Optional: tuple[min: float, max: float] | tuple[min: torch.Tensor, max: torch.Tensor]):
+                If specified, sampling of timestep (t) sampling is restricted to [min, max] range,
+                as opposed to [0, 1]. Can be either a tuple of floats or a tuple of tensors for multivariate schedules.
             sampling_eps (float; default: 0.05): Effective minimum sampled t.
             antithetic_sampling (bool; default: False): Whether to use antithetic
                 sampling.
@@ -114,6 +116,12 @@ class DenoisingCollator:
                     device="cpu",
                 )
 
+    def update_noise_schedule(self, annealing_progress: float) -> None:
+        self.restricted_t_range = (
+            0,
+            torch.linspace(1, annealing_progress, self.block_size),
+        )
+
     def _sample_t(self, global_batch_size, batch_size, t_index, device):
         num_blocks = self.max_length // self.block_size if self.block_size else 1
         if self.block_size is not None and self.block_size > 0:
@@ -131,12 +139,15 @@ class DenoisingCollator:
             )
             _eps_t = (_eps_t / global_batch_size + offset) % 1
         t = (1 - self.sampling_eps) * _eps_t + self.sampling_eps
-        if self.restricted_t_range is not None:
-            low, high = self.restricted_t_range
-            t = (low - high) * t + high
         if self.block_size is not None and self.block_size > 0:
             t = t[..., torch.randperm(t.shape[-1])]
-            return t.repeat_interleave(self.block_size, dim=1)
+            t = t.repeat_interleave(self.block_size, dim=1)
+        # Apply restricted t range per-block
+        if self.restricted_t_range is not None:
+            t = t.reshape(t.shape[0], num_blocks, self.block_size)
+            low, high = self.restricted_t_range
+            t = (low - high) * t + high
+            t = t.reshape(t.shape[0], num_blocks * self.block_size)
         return t
 
     def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
