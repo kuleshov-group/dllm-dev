@@ -10,6 +10,7 @@ defaults:
       - lr_monitor
       - speed_monitor
       - log_gradient_norms
+      - log_gradient_variance
       - hf_compatible_checkpointing
       - save_best_checkpointing
   - loggers: wandb
