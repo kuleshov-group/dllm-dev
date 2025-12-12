@@ -1,3 +1,4 @@
+import logging
 import os
 import random
 from typing import Any
@@ -14,6 +15,8 @@ from omegaconf import DictConfig, OmegaConf
 from transformers import PreTrainedTokenizer
 
 from src.denoiser.base import Denoiser
+
+log = logging.getLogger(__name__)
 
 
 def _make_tokenization_config(tokenizer_cfg: DictConfig) -> dict[str, Any]:
@@ -233,7 +236,7 @@ def load_model_from_ckpt_dir_path(
             map_location=device,
         )
     except FileNotFoundError:
-        print("Checkpoint not found; reinitializing model from scratch")
+        log.info("Checkpoint not found; reinitializing model from scratch")
         return model
     if verbose:
         if (
@@ -246,11 +249,11 @@ def load_model_from_ckpt_dir_path(
             metric_dict = ckpt["state"]["callbacks"]["SaveBestCheckpointing"][
                 "all_saved_checkpoints_to_timestamp"
             ][-1][-1]
-            print(
+            log.info(
                 f"Loaded ckpt from ep: {timestamp['epoch']}; "
                 f"batch: {timestamp['batch']}."
             )
-            print("Metric value at best checkpoint:", metric_dict)
+            log.info("Metric value at best checkpoint:", metric_dict)
 
     if load_ema_weights:
         state_dict = None
